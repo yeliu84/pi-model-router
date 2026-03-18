@@ -1,0 +1,20 @@
+{
+  "defaultProfile": "auto",
+  "debug": false,
+  "profiles": {
+    "auto": {
+      "high": {
+        "model": "openai/gpt-5",
+        "thinking": "high"
+      },
+      "medium": {
+        "model": "google/gemini-flash-latest",
+        "thinking": "medium"
+      },
+      "low": {
+        "model": "openai/gpt-4.1-nano",
+        "thinking": "low"
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "pi-model-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Configurable model router extension for pi coding agent",
+  "keywords": ["pi-package", "pi", "model-router", "llm", "coding-agent"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}

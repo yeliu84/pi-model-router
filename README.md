@@ -4,6 +4,8 @@ Extension-first model router for pi.
 
 Current status: working development preview.
 
+Note: the router widget is now hidden by default and can be toggled with `/router-widget`.
+
 ## What it does
 
 - registers a logical custom provider: `router`
@@ -71,6 +73,8 @@ After loading the extension:
 /router-pin high
 /router-pin cheap low
 /router-pin auto
+/router-widget on
+/router-widget off
 /router-off
 /router-reload
 /router-debug
@@ -88,7 +92,7 @@ If `router/auto` does not appear in `/model`, run `/router-reload` after adding 
 
 ## Status behavior
 
-When the active model is a router profile, the extension status shows the effective routed target, and a widget shows the current profile, pin, and last routed target.
+When the active model is a router profile, the extension status shows the effective routed target. An optional widget can also show the current profile, pin, and last routed target.
 
 ```text
 router:auto -> high -> openai/gpt-5
@@ -96,6 +100,8 @@ router:auto [pin:high] -> high -> openai/gpt-5
 ```
 
 When router is not active, status shows the selected profile, that profile's active pin if any, and the last non-router fallback model.
+
+Use `/router-widget on` to show the widget and `/router-widget off` to hide it again.
 
 ## Notes
 

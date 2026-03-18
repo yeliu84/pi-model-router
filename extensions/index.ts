@@ -55,6 +55,7 @@ interface RouterPersistedState {
 	pinTier?: RouterTier;
 	pinByProfile?: RouterPinByProfile;
 	debugEnabled?: boolean;
+	widgetEnabled?: boolean;
 	debugHistory?: RoutingDecision[];
 	lastPhase?: RouterPhase;
 	lastDecision?: RoutingDecision;
@@ -541,6 +542,7 @@ function isRouterPersistedState(value: unknown): value is RouterPersistedState {
 		(value.pinTier === undefined || isRouterTier(value.pinTier)) &&
 		(value.pinByProfile === undefined || isRouterPinByProfile(value.pinByProfile)) &&
 		(value.debugEnabled === undefined || typeof value.debugEnabled === "boolean") &&
+		(value.widgetEnabled === undefined || typeof value.widgetEnabled === "boolean") &&
 		(value.debugHistory === undefined ||
 			(Array.isArray(value.debugHistory) && value.debugHistory.every((decision) => isRoutingDecision(decision)))) &&
 		(value.lastPhase === undefined ||
@@ -561,6 +563,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 	let debugEnabled = false;
 	let routerEnabled = false;
 	let selectedProfile = resolveProfileName(FALLBACK_CONFIG, FALLBACK_CONFIG.defaultProfile);
+	let widgetEnabled = false;
 	let pinnedTierByProfile: RouterPinByProfile = {};
 	let debugHistory: RoutingDecision[] = [];
 	let lastNonRouterModel: string | undefined;
@@ -638,6 +641,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 		pinTier: getPinnedTierForProfile(selectedProfile),
 		pinByProfile: { ...pinnedTierByProfile },
 		debugEnabled,
+		widgetEnabled,
 		debugHistory,
 		lastPhase: lastDecision?.phase,
 		lastDecision,
@@ -687,6 +691,11 @@ export default function routerExtension(pi: ExtensionAPI) {
 				: `router:off (${selectedProfile}${pinLabel}) -> ${formatModelRef(lastNonRouterModel)}`;
 		}
 		ctx.ui.setStatus("router", statusText);
+
+		if (!widgetEnabled) {
+			ctx.ui.setWidget("router", undefined);
+			return;
+		}
 
 		const widgetLines = [
 			`Router: ${routerEnabled ? "enabled" : "disabled"}`,
@@ -861,6 +870,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 		routerEnabled = ctx.model?.provider === "router";
 		selectedProfile = resolveProfileName(currentConfig, ctx.model?.provider === "router" ? ctx.model.id : selectedProfile);
 		pinnedTierByProfile = {};
+		widgetEnabled = false;
 		debugHistory = [];
 		lastNonRouterModel = ctx.model && ctx.model.provider !== "router" ? `${ctx.model.provider}/${ctx.model.id}` : lastNonRouterModel;
 		lastDecision = undefined;
@@ -881,6 +891,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 				setPinnedTierForProfile(selectedProfile, savedState.pinTier);
 			}
 			debugEnabled = savedState.debugEnabled ?? debugEnabled;
+			widgetEnabled = savedState.widgetEnabled ?? widgetEnabled;
 			debugHistory = savedState.debugHistory ? [...savedState.debugHistory].slice(-MAX_DEBUG_HISTORY) : [];
 			lastDecision = savedState.lastDecision;
 			lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
@@ -907,6 +918,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 				`Selected profile: ${selectedProfile}`,
 				`Selected profile pin: ${getPinnedTierForProfile(selectedProfile) ?? "auto"}`,
 				`Pins by profile: ${formatPinSummary()}`,
+				`Widget: ${widgetEnabled ? "on" : "off"}`,
 				`Default profile: ${resolveProfileName(currentConfig, currentConfig.defaultProfile)}`,
 				`Available profiles: ${names}`,
 				`Last non-router model: ${formatModelRef(lastNonRouterModel)}`,
@@ -934,6 +946,40 @@ export default function routerExtension(pi: ExtensionAPI) {
 			await ensureValidActiveRouterProfile(ctx);
 			ctx.ui.notify(`Router config reloaded. Profiles: ${profileNames(currentConfig).join(", ")}`, "info");
 			notifyConfigWarnings(ctx);
+		},
+	});
+
+	pi.registerCommand("router-widget", {
+		description: "Show or hide the router widget: on|off|toggle",
+		handler: async (args, ctx) => {
+			const command = args?.trim().toLowerCase();
+			if (!command) {
+				ctx.ui.notify(`Router widget: ${widgetEnabled ? "on" : "off"}\nCommands: /router-widget on | off | toggle`, "info");
+				updateStatus(ctx);
+				return;
+			}
+			if (command === "on") {
+				widgetEnabled = true;
+				persistState();
+				updateStatus(ctx);
+				ctx.ui.notify("Router widget enabled", "info");
+				return;
+			}
+			if (command === "off") {
+				widgetEnabled = false;
+				persistState();
+				updateStatus(ctx);
+				ctx.ui.notify("Router widget hidden", "info");
+				return;
+			}
+			if (command === "toggle") {
+				widgetEnabled = !widgetEnabled;
+				persistState();
+				updateStatus(ctx);
+				ctx.ui.notify(`Router widget ${widgetEnabled ? "enabled" : "hidden"}`, "info");
+				return;
+			}
+			ctx.ui.notify("Usage: /router-widget on | off | toggle", "error");
 		},
 	});
 

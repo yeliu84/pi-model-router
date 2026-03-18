@@ -14,13 +14,14 @@ Last updated: 2026-03-18
 - [x] Implement heuristic per-turn routing (`high` / `medium` / `low`)
 - [x] Delegate routed requests to underlying provider models via `pi-ai`
 - [x] Persist router state in session entries
-- [x] Add router commands (`/router`, `/router-profile`, `/router-reload`, `/router-debug`)
-- [x] Add status UI showing effective routed tier/model
+- [x] Add router commands (`/router`, `/router-profile`, `/router-on`, `/router-off`, `/router-pin`, `/router-reload`, `/router-debug`)
+- [x] Add status UI and widget showing effective routed tier/model
 - [x] Add package metadata and installation docs
 - [x] Harden config/state handling and add explicit `/router-on` / `/router-off` commands
 - [x] Add `/router-pin high|medium|low|auto` to override heuristic tier selection
 - [x] Make router pinning persist per profile and improve `/router-debug` with recent decision history
 - [x] Allow pinning other profiles without switching and add a router state widget
+- [x] Make the router widget toggleable and hidden by default
 
 ## Objective
 
@@ -231,6 +232,7 @@ Recommended commands:
 - `/router-reload`
 - `/router-pin high|medium|low|auto`
 - `/router-pin <profile> <high|medium|low|auto>`
+- `/router-widget on|off|toggle`
 
 ### UI/status
 
@@ -248,6 +250,7 @@ Best v1 mechanism:
 Implemented in current preview:
 
 - widget showing profile, phase, tier, and effective model
+- widget visibility toggle, hidden by default
 
 ## Signals to inspect for routing
 
@@ -407,7 +410,10 @@ No attempt to perfectly replicate vendor-specific internals.
   - `/router-debug` can now show recent routing decisions and supports `on`, `off`, `toggle`, and `clear`
   - recent decision history is persisted in router state for easier inspection after resume
   - added a router widget showing the current profile, pin, and most recent effective route
+  - made the widget toggleable via `/router-widget on|off|toggle` and hidden by default
 - Re-validated the extension after the pinning/debug/widget update:
   - `pi -e ./extensions/index.ts --model router/auto --mode json "/router-pin high" "Summarize ..."` routes the summary turn through the pinned profile tier
   - `pi -e ./extensions/index.ts --model router/auto --mode json "/router-pin high" "/router-pin auto" "Summarize ..."` returns the summary turn to the heuristic path
-- Next step: explore optional classifier support and any additional routing controls now that manual override and debugging are in place.
+  - `pi -e ./extensions/index.ts --list-models router` still shows `router/auto` after the latest UI/command changes
+- Initialized a git repository for the package and committed the current state.
+- Next step: explore optional classifier support and any additional routing controls now that manual override, widgets, and debugging are in place.

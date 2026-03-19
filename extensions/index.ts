@@ -224,7 +224,7 @@ const routerExtension = (pi: ExtensionAPI) => {
     lastExtensionContext = ctx;
     currentModelRegistry = ctx.modelRegistry;
     currentCwd = ctx.cwd;
-    actions.reloadConfig(ctx);
+    actions.reloadConfig();
 
     routerEnabled = ctx.model?.provider === 'router';
     selectedProfile = resolveProfileName(
@@ -285,6 +285,7 @@ const routerExtension = (pi: ExtensionAPI) => {
     }
 
     persistState();
+    actions.updateStatus(ctx);
   };
 
   registerCommands(

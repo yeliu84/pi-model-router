@@ -22,9 +22,16 @@ type RouterPinByProfile = Partial<Record<string, RouterTier>>;
 type RouterThinkingByTier = Partial<Record<RouterTier, ThinkingLevel>>;
 type RouterThinkingByProfile = Record<string, RouterThinkingByTier>;
 
+interface RoutingRule {
+	matches: string | string[];
+	tier: RouterTier;
+	reason?: string;
+}
+
 interface RoutedTierConfig {
 	model: string;
 	thinking?: ThinkingLevel;
+	fallbacks?: string[];
 }
 
 interface RouterProfile {
@@ -38,6 +45,9 @@ interface RouterConfig {
 	debug?: boolean;
 	classifierModel?: string;
 	phaseBias?: number;
+	largeContextThreshold?: number;
+	maxSessionBudget?: number;
+	rules?: RoutingRule[];
 	profiles: Record<string, RouterProfile>;
 }
 
@@ -52,6 +62,10 @@ interface RoutingDecision {
 	thinking: ThinkingLevel;
 	timestamp: number;
 	isClassifier?: boolean;
+	isFallback?: boolean;
+	isContextTriggered?: boolean;
+	isBudgetForced?: boolean;
+	isRuleMatched?: boolean;
 }
 
 interface RouterPersistedState {
@@ -66,6 +80,7 @@ interface RouterPersistedState {
 	lastPhase?: RouterPhase;
 	lastDecision?: RoutingDecision;
 	lastNonRouterModel?: string;
+	accumulatedCost?: number;
 	timestamp: number;
 }
 
@@ -151,6 +166,9 @@ function mergeConfig(base: RouterConfig, override: Partial<RouterConfig>): Route
 		debug: override.debug ?? base.debug,
 		classifierModel: override.classifierModel ?? base.classifierModel,
 		phaseBias: override.phaseBias ?? base.phaseBias,
+		largeContextThreshold: override.largeContextThreshold ?? base.largeContextThreshold,
+		maxSessionBudget: override.maxSessionBudget ?? base.maxSessionBudget,
+		rules: override.rules ?? base.rules,
 		profiles: mergedProfiles,
 	};
 }
@@ -200,7 +218,22 @@ function normalizeTierConfig(
 		);
 	}
 
-	return { model: parsedModel, thinking };
+	let fallbacks: string[] | undefined = undefined;
+	if (Array.isArray(value.fallbacks)) {
+		fallbacks = [];
+		for (const f of value.fallbacks) {
+			if (typeof f === "string") {
+				try {
+					parseCanonicalModelRef(f);
+					fallbacks.push(f);
+				} catch (error) {
+					warnings.push(`Invalid fallback model \"${f}\" in profile \"${profileName}\" ${tier} tier: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+		}
+	}
+
+	return { model: parsedModel, thinking, fallbacks };
 }
 
 function normalizeConfig(raw: RouterConfig): ConfigLoadResult {
@@ -235,6 +268,33 @@ function normalizeConfig(raw: RouterConfig): ConfigLoadResult {
 
 	const phaseBias = typeof raw.phaseBias === "number" ? Math.max(0, Math.min(1, raw.phaseBias)) : 0.5;
 
+	const largeContextThreshold = typeof raw.largeContextThreshold === "number" && raw.largeContextThreshold > 0
+		? raw.largeContextThreshold
+		: undefined;
+
+	const maxSessionBudget = typeof raw.maxSessionBudget === "number" && raw.maxSessionBudget > 0
+		? raw.maxSessionBudget
+		: undefined;
+
+	const rules: RoutingRule[] = [];
+	if (Array.isArray(raw.rules)) {
+		for (const rule of raw.rules) {
+			if (isObjectRecord(rule)) {
+				const matches = rule.matches;
+				const tier = rule.tier;
+				if ((typeof matches === "string" || Array.isArray(matches)) && isRouterTier(tier)) {
+					rules.push({
+						matches: Array.isArray(matches) ? matches.map((m) => m.toLowerCase()) : matches.toLowerCase(),
+						tier,
+						reason: typeof rule.reason === "string" ? rule.reason : undefined,
+					});
+				} else {
+					warnings.push(`Ignored invalid routing rule: ${JSON.stringify(rule)}`);
+				}
+			}
+		}
+	}
+
 	let classifierModel = typeof raw.classifierModel === "string" ? raw.classifierModel.trim() : undefined;
 	if (classifierModel) {
 		try {
@@ -251,6 +311,9 @@ function normalizeConfig(raw: RouterConfig): ConfigLoadResult {
 			debug: typeof raw.debug === "boolean" ? raw.debug : false,
 			classifierModel,
 			phaseBias,
+			largeContextThreshold,
+			maxSessionBudget,
+			rules: rules.length > 0 ? rules : undefined,
 			profiles: normalizedProfiles,
 		},
 		warnings,
@@ -405,6 +468,8 @@ function decideRouting(
 	pinnedTier?: RouterTier,
 	thinkingOverrides?: RouterThinkingByTier,
 	phaseBias = 0.5,
+	rules?: RoutingRule[],
+	isBudgetExceeded = false,
 ): RoutingDecision {
 	const prompt = getLastUserText(context).toLowerCase();
 	const recentConversation = getRecentConversationText(context);
@@ -489,65 +554,95 @@ function decideRouting(
 	let phase: RouterPhase = previousDecision?.phase ?? "implementation";
 	let tier: RouterTier = "medium";
 	let reasoning = "Defaulted to medium tier for general coding work.";
-
-	// Sticky phase adjustments
-	const highThreshold = Math.max(40, 120 - (previousDecision?.phase === "planning" ? phaseBias * 80 : 0));
-	const lowThreshold = Math.max(4, 12 - (previousDecision?.phase === "implementation" || previousDecision?.phase === "planning" ? phaseBias * 8 : 0));
+	let isRuleMatched = false;
 
 	if (pinnedTier) {
 		phase = phaseForTier(pinnedTier);
 		tier = pinnedTier;
 		reasoning = `Pinned to ${pinnedTier} tier via /router-pin.`;
-	} else if (containsAny(prompt, explicitHighHints)) {
-		phase = "planning";
-		tier = "high";
-		reasoning = "Detected an explicit request for deeper or higher-quality reasoning.";
-	} else if (containsAny(prompt, explicitLowHints)) {
-		phase = "lightweight";
-		tier = "low";
-		reasoning = "Detected an explicit request for a faster or lighter response.";
-	} else if (containsAny(prompt, summaryKeywords)) {
-		phase = "lightweight";
-		tier = "low";
-		reasoning = "Detected summary or lightweight transformation keywords.";
-	} else if (
-		containsAny(prompt, planningKeywords) ||
-		prompt.startsWith("why ") ||
-		wordCount >= highThreshold ||
-		multiLinePrompt
-	) {
-		phase = "planning";
-		tier = "high";
-		reasoning = previousDecision?.phase === "planning"
-			? "Continued planning phase based on complexity or keywords."
-			: "Detected planning, broad analysis, or a high-complexity request.";
-	} else if (containsAny(prompt, implementationKeywords)) {
-		phase = "implementation";
-		tier = "medium";
-		reasoning = "Detected implementation-oriented work with bounded execution scope.";
-	} else if (containsAny(prompt, lookupKeywords) && wordCount <= 24 && toolResultCount === 0) {
-		phase = "lightweight";
-		tier = "low";
-		reasoning = "Detected a short read-only lookup request.";
-	} else if (previousDecision?.phase === "planning" && toolResultCount === 0 && wordCount > lowThreshold) {
-		phase = "planning";
-		tier = "high";
-		reasoning = "Kept the planning-phase bias because the conversation still looks exploratory.";
-	} else if (
-		toolResultCount > 0 ||
-		previousDecision?.phase === "implementation" ||
-		recentConversation.includes("plan:")
-	) {
-		phase = "implementation";
-		tier = "medium";
-		reasoning = "Detected active implementation work from prior tools or recent plan execution context.";
-	} else if (wordCount <= lowThreshold) {
-		phase = "lightweight";
-		tier = "low";
-		reasoning = "Detected a short bounded request.";
+	} else {
+		// Check custom rules first
+		if (rules) {
+			for (const rule of rules) {
+				const matches = Array.isArray(rule.matches) ? rule.matches : [rule.matches];
+				if (containsAny(prompt, matches)) {
+					tier = rule.tier;
+					phase = phaseForTier(tier);
+					reasoning = rule.reason ?? `Matched custom routing rule for: ${matches.join(", ")}`;
+					isRuleMatched = true;
+					break;
+				}
+			}
+		}
+
+		if (!isRuleMatched) {
+			// Sticky phase adjustments
+			const highThreshold = Math.max(40, 120 - (previousDecision?.phase === "planning" ? phaseBias * 80 : 0));
+			const lowThreshold = Math.max(4, 12 - (previousDecision?.phase === "implementation" || previousDecision?.phase === "planning" ? phaseBias * 8 : 0));
+
+			if (containsAny(prompt, explicitHighHints)) {
+				phase = "planning";
+				tier = "high";
+				reasoning = "Detected an explicit request for deeper or higher-quality reasoning.";
+			} else if (containsAny(prompt, explicitLowHints)) {
+				phase = "lightweight";
+				tier = "low";
+				reasoning = "Detected an explicit request for a faster or lighter response.";
+			} else if (containsAny(prompt, summaryKeywords)) {
+				phase = "lightweight";
+				tier = "low";
+				reasoning = "Detected summary or lightweight transformation keywords.";
+			} else if (
+				containsAny(prompt, planningKeywords) ||
+				prompt.startsWith("why ") ||
+				wordCount >= highThreshold ||
+				multiLinePrompt
+			) {
+				phase = "planning";
+				tier = "high";
+				reasoning = previousDecision?.phase === "planning"
+					? "Continued planning phase based on complexity or keywords."
+					: "Detected planning, broad analysis, or a high-complexity request.";
+			} else if (containsAny(prompt, implementationKeywords)) {
+				phase = "implementation";
+				tier = "medium";
+				reasoning = "Detected implementation-oriented work with bounded execution scope.";
+			} else if (containsAny(prompt, lookupKeywords) && wordCount <= 24 && toolResultCount === 0) {
+				phase = "lightweight";
+				tier = "low";
+				reasoning = "Detected a short read-only lookup request.";
+			} else if (previousDecision?.phase === "planning" && toolResultCount === 0 && wordCount > lowThreshold) {
+				phase = "planning";
+				tier = "high";
+				reasoning = "Kept the planning-phase bias because the conversation still looks exploratory.";
+			} else if (
+				toolResultCount > 0 ||
+				previousDecision?.phase === "implementation" ||
+				recentConversation.includes("plan:")
+			) {
+				phase = "implementation";
+				tier = "medium";
+				reasoning = "Detected active implementation work from prior tools or recent plan execution context.";
+			} else if (wordCount <= lowThreshold) {
+				phase = "lightweight";
+				tier = "low";
+				reasoning = "Detected a short bounded request.";
+			}
+		}
 	}
 
-	return buildRoutingDecision(profileName, profile, tier, phase, reasoning, thinkingOverrides, false);
+	let isBudgetForced = false;
+	if (isBudgetExceeded && tier === "high") {
+		tier = "medium";
+		phase = "implementation";
+		reasoning = `Budget exceeded. Downgraded from high to medium tier. (Original: ${reasoning})`;
+		isBudgetForced = true;
+	}
+
+	const decision = buildRoutingDecision(profileName, profile, tier, phase, reasoning, thinkingOverrides, false);
+	decision.isRuleMatched = isRuleMatched;
+	decision.isBudgetForced = isBudgetForced;
+	return decision;
 }
 
 async function runClassifier(
@@ -555,9 +650,13 @@ async function runClassifier(
 	modelRegistry: ExtensionContext["modelRegistry"],
 	context: Context,
 	currentPhase?: RouterPhase,
+	onCost?: (cost: number) => void,
 ): Promise<{ tier: RouterTier; reasoning: string } | undefined> {
 	try {
 		const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
+		if (provider === "router") {
+			return undefined; // prevent recursion
+		}
 		const model = modelRegistry.find(provider, modelId);
 		if (!model) return undefined;
 
@@ -591,6 +690,7 @@ ${currentPhase === "implementation" ? "Consider that the conversation is current
 		const classifierContext: Context = {
 			...context,
 			messages: [{ role: "user", content: classifierPrompt }],
+			tools: undefined, // ensure classifier doesn't try to use tools
 		};
 
 		const stream = streamSimple(model, classifierContext, { apiKey, reasoning: "off" });
@@ -600,6 +700,10 @@ ${currentPhase === "implementation" ? "Consider that the conversation is current
 				fullText += (event as any).content;
 			} else if (event.type === "text_delta" && typeof (event as any).delta === "string") {
 				fullText += (event as any).delta;
+			} else if (event.type === "done") {
+				if (onCost) {
+					onCost(event.message.usage?.cost?.total ?? 0);
+				}
 			}
 		}
 
@@ -608,12 +712,19 @@ ${currentPhase === "implementation" ? "Consider that the conversation is current
 		const reasoningLine = lines.find((l) => l.toLowerCase().startsWith("reasoning:"));
 
 		if (tierLine) {
-			const tierValue = tierLine.split(":")[1].trim().toLowerCase();
-			if (isRouterTier(tierValue)) {
-				return {
-					tier: tierValue,
-					reasoning: reasoningLine ? reasoningLine.split(":")[1].trim() : "Classifier decision.",
-				};
+			const parts = tierLine.split(":");
+			if (parts.length >= 2) {
+				const tierValue = parts[1].trim().toLowerCase();
+				if (isRouterTier(tierValue)) {
+					let reasoning = "Classifier decision.";
+					if (reasoningLine) {
+						const rParts = reasoningLine.split(":");
+						if (rParts.length >= 2) {
+							reasoning = rParts[1].trim();
+						}
+					}
+					return { tier: tierValue, reasoning };
+				}
 			}
 		}
 	} catch (error) {
@@ -701,6 +812,8 @@ export default function routerExtension(pi: ExtensionAPI) {
 	let thinkingByProfile: RouterThinkingByProfile = {};
 	let debugHistory: RoutingDecision[] = [];
 	let lastNonRouterModel: string | undefined;
+	let accumulatedCost = 0;
+	let lastExtensionContext: ExtensionContext | undefined;
 	let lastConfigWarnings: string[] = [];
 	let lastPersistedSnapshot: string | undefined;
 	let isInitialized = false;
@@ -782,6 +895,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 		lastPhase: lastDecision?.phase,
 		lastDecision,
 		lastNonRouterModel,
+		accumulatedCost,
 		timestamp: Date.now(),
 	});
 
@@ -871,11 +985,20 @@ export default function routerExtension(pi: ExtensionAPI) {
 			`Router: ${routerEnabled ? "enabled" : "disabled"}`,
 			`Profile: ${statusProfile}${activeRouterProfile ? " (active)" : ""}`,
 			`Pin: ${activePin ?? "auto"}`,
+			`Cost: $${accumulatedCost.toFixed(4)}` + (currentConfig.maxSessionBudget ? ` / $${currentConfig.maxSessionBudget.toFixed(2)}` : ""),
 		];
 		if (lastDecision && lastDecision.profile === statusProfile) {
 			const effectiveThinking = thinkingByProfile[statusProfile]?.[lastDecision.tier] ?? lastDecision.thinking;
+			const flags = [];
+			if (lastDecision.isFallback) flags.push("fallback");
+			if (lastDecision.isContextTriggered) flags.push("context");
+			if (lastDecision.isBudgetForced) flags.push("budget-limit");
+			if (lastDecision.isRuleMatched) flags.push("rule");
+			
+			const flagsStr = flags.length > 0 ? ` [${flags.join(",")}]` : "";
+
 			widgetLines.push(
-				`Route: ${lastDecision.tier} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
+				`Route: ${lastDecision.tier}${flagsStr} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
 				`Phase: ${lastDecision.phase}`,
 			);
 		} else if (!routerEnabled && lastNonRouterModel) {
@@ -890,10 +1013,6 @@ export default function routerExtension(pi: ExtensionAPI) {
 	let isProviderRegistered = false;
 
 	const registerRouterProvider = () => {
-		if (isProviderRegistered) {
-			return;
-		}
-
 		const models = profileNames(currentConfig).map((name) => ({
 			id: name,
 			name: `Router ${name}`,
@@ -927,14 +1046,51 @@ export default function routerExtension(pi: ExtensionAPI) {
 						routerEnabled = true;
 
 						const pinnedTier = getPinnedTierForProfile(model.id);
-						let decision: RoutingDecision;
+						const isBudgetExceeded = currentConfig.maxSessionBudget !== undefined && accumulatedCost >= currentConfig.maxSessionBudget;
 
-						if (currentConfig.classifierModel && !pinnedTier) {
+						let decision: RoutingDecision = decideRouting(
+							context,
+							model.id,
+							profile,
+							lastDecision,
+							pinnedTier,
+							thinkingByProfile[model.id],
+							currentConfig.phaseBias,
+							currentConfig.rules,
+							isBudgetExceeded,
+						);
+
+						// Optional Context Trigger Upgrade (if not already high tier)
+						if (currentConfig.largeContextThreshold && decision.tier !== "high" && lastExtensionContext) {
+							try {
+								const usage = await lastExtensionContext.getContextUsage();
+								if (usage.totalTokens > currentConfig.largeContextThreshold) {
+									decision = buildRoutingDecision(
+										model.id,
+										profile,
+										"high",
+										"planning",
+										`Context usage (${usage.totalTokens}) exceeds threshold (${currentConfig.largeContextThreshold}). Forced high tier.`,
+										thinkingByProfile[model.id],
+										false,
+									);
+									decision.isContextTriggered = true;
+								}
+							} catch (e) {
+								// ignore context usage errors
+							}
+						}
+
+						// Classifier Override (only if not pinned, not context-triggered, and not a custom rule match)
+						if (currentConfig.classifierModel && !pinnedTier && !decision.isContextTriggered && !decision.isRuleMatched) {
 							const classifierResult = await runClassifier(
 								currentConfig.classifierModel,
 								currentModelRegistry,
 								context,
 								lastDecision?.phase,
+								(cost) => {
+									accumulatedCost += cost;
+								},
 							);
 							if (classifierResult) {
 								decision = buildRoutingDecision(
@@ -946,57 +1102,90 @@ export default function routerExtension(pi: ExtensionAPI) {
 									thinkingByProfile[model.id],
 									true,
 								);
-							} else {
-								decision = decideRouting(
-									context,
-									model.id,
-									profile,
-									lastDecision,
-									pinnedTier,
-									thinkingByProfile[model.id],
-									currentConfig.phaseBias,
-								);
+								// If budget exceeded, still downgrade classifier decision
+								if (isBudgetExceeded && decision.tier === "high") {
+									decision.tier = "medium";
+									decision.phase = "implementation";
+									decision.reasoning = `Budget exceeded. Downgraded classifier decision to medium. (Original: ${decision.reasoning})`;
+									decision.isBudgetForced = true;
+								}
 							}
-						} else {
-							decision = decideRouting(
-								context,
-								model.id,
-								profile,
-								lastDecision,
-								pinnedTier,
-								thinkingByProfile[model.id],
-								currentConfig.phaseBias,
-							);
 						}
 
 						lastDecision = decision;
 						recordDebugDecision(decision);
 
-						if (decision.targetProvider === "router") {
-							throw new Error("Router profiles may not point at router/* models.");
+						const modelsToTry = [decision.targetLabel, ...(profile[decision.tier].fallbacks ?? [])];
+						let lastError: any;
+						let success = false;
+
+						for (let i = 0; i < modelsToTry.length; i++) {
+							const modelRef = modelsToTry[i];
+							const { provider: targetProvider, modelId: targetModelId } = parseCanonicalModelRef(modelRef);
+
+							if (targetProvider === "router") {
+								continue; // safety
+							}
+
+							const targetModel = currentModelRegistry.find(targetProvider, targetModelId);
+							if (!targetModel) {
+								lastError = new Error(`Routed model not found: ${targetProvider}/${targetModelId}`);
+								continue;
+							}
+
+							const apiKey = await currentModelRegistry.getApiKey(targetModel);
+							if (!apiKey) {
+								lastError = new Error(`No API key for routed model: ${targetProvider}/${targetModelId}`);
+								continue;
+							}
+
+							try {
+								const thinkingOverride = getThinkingOverride(model.id, decision.tier);
+								const delegatedStream = streamSimple(targetModel, context, {
+									...options,
+									apiKey,
+									reasoning: targetModel.reasoning ? (thinkingOverride ?? decision.thinking) : "off",
+								});
+
+								let contentReceived = false;
+								for await (const event of delegatedStream) {
+									if (event.type === "done" || event.type === "error") {
+										if (event.type === "done") {
+											const cost = event.message.usage?.cost?.total ?? 0;
+											accumulatedCost += cost;
+
+											// Overwrite the message's provider and model to maintain the router abstraction.
+											event.message.provider = "router";
+											event.message.model = model.id;
+										}
+										if (event.type === "error" && !contentReceived) {
+											throw new Error((event as any).error?.errorMessage || "Model failed before sending content.");
+										}
+									}
+									const isContent =
+										event.type === "chunk" ||
+										event.type === "text_delta" ||
+										event.type === "thinking_delta" ||
+										(event.type as string) === "tool_call_delta" ||
+										(event.type as string) === "toolCall";
+									if (isContent) {
+										contentReceived = true;
+									}
+									stream.push(event);
+								}
+								success = true;
+								if (i > 0) decision.isFallback = true;
+								break;
+							} catch (err) {
+								lastError = err;
+								// continue to next fallback
+							}
 						}
 
-						const targetModel = currentModelRegistry.find(decision.targetProvider, decision.targetModelId);
-						if (!targetModel) {
-							throw new Error(`Routed model not found: ${decision.targetProvider}/${decision.targetModelId}`);
+						if (!success) {
+							throw lastError || new Error("Failed to delegate to any model in the chain.");
 						}
 
-						const apiKey = await currentModelRegistry.getApiKey(targetModel);
-						if (!apiKey) {
-							throw new Error(`No API key for routed model: ${decision.targetProvider}/${decision.targetModelId}`);
-						}
-
-						const thinkingOverride = getThinkingOverride(model.id, decision.tier);
-						const delegatedStream = streamSimple(targetModel, context, {
-							...options,
-							apiKey,
-							reasoning: targetModel.reasoning ? (thinkingOverride ?? decision.thinking) : "off",
-						});
-
-						for await (const event of delegatedStream) {
-							stream.push(event);
-						}
-						persistState();
 						stream.end();
 					} catch (error) {
 						stream.push({
@@ -1005,13 +1194,14 @@ export default function routerExtension(pi: ExtensionAPI) {
 							error: createErrorMessage(model, error instanceof Error ? error.message : String(error)),
 						});
 						stream.end();
+					} finally {
+						persistState();
 					}
 				})();
 
 				return stream;
 			},
 		});
-
 		isProviderRegistered = true;
 	};
 
@@ -1081,6 +1271,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 	};
 
 	const restoreStateFromSession = async (ctx: ExtensionContext) => {
+		lastExtensionContext = ctx;
 		currentModelRegistry = ctx.modelRegistry;
 		currentCwd = ctx.cwd;
 		reloadConfig(ctx);
@@ -1091,6 +1282,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 		thinkingByProfile = {};
 		widgetEnabled = false;
 		debugHistory = [];
+		accumulatedCost = 0;
 		lastNonRouterModel = ctx.model && ctx.model.provider !== "router" ? `${ctx.model.provider}/${ctx.model.id}` : lastNonRouterModel;
 		lastDecision = undefined;
 
@@ -1112,6 +1304,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 			widgetEnabled = savedState.widgetEnabled ?? widgetEnabled;
 			debugHistory = savedState.debugHistory ? [...savedState.debugHistory].slice(-MAX_DEBUG_HISTORY) : [];
 			lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
+			accumulatedCost = savedState.accumulatedCost ?? 0;
 		}
 
 		await ensureValidActiveRouterProfile(ctx);
@@ -1150,6 +1343,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 				`Thinking overrides: ${formatThinkingSummary()}`,
 				`Widget: ${widgetEnabled ? "on" : "off"}`,
 				`Phase bias: ${currentConfig.phaseBias}`,
+				`Session cost: $${accumulatedCost.toFixed(4)}` + (currentConfig.maxSessionBudget ? ` / $${currentConfig.maxSessionBudget.toFixed(2)}` : ""),
 				`Default profile: ${resolveProfileName(currentConfig, currentConfig.defaultProfile)}`,
 				`Available profiles: ${names}`,
 				`Last non-router model: ${formatModelRef(lastNonRouterModel)}`,
@@ -1445,6 +1639,29 @@ export default function routerExtension(pi: ExtensionAPI) {
 					: `Router profile ${profileName} thinking (${tier}) reset to config defaults`,
 				"info",
 			);
+		},
+	});
+
+	pi.registerCommand("router-fix", {
+		description: "Correct the last routing decision and pin that tier",
+		getArgumentCompletions: (prefix) => {
+			const items = ["high", "medium", "low"].filter((t) => t.startsWith(prefix.toLowerCase())).map((t) => ({ value: t, label: t }));
+			return items.length > 0 ? items : null;
+		},
+		handler: async (args, ctx) => {
+			const tier = args?.trim().toLowerCase();
+			if (!isRouterTier(tier)) {
+				ctx.ui.notify("Usage: /router-fix <high|medium|low>", "error");
+				return;
+			}
+			if (!lastDecision) {
+				ctx.ui.notify("No recent routing decision to fix.", "warning");
+				return;
+			}
+			setPinnedTierForProfile(lastDecision.profile, tier);
+			persistState();
+			updateStatus(ctx);
+			ctx.ui.notify(`Router decision corrected. ${lastDecision.profile} is now pinned to ${tier}.`, "info");
 		},
 	});
 

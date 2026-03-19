@@ -23,6 +23,7 @@ Last updated: 2026-03-18
 - [x] Allow pinning other profiles without switching and add a router state widget
 - [x] Make the router widget toggleable and hidden by default
 - [x] Re-apply the last active router model on relaunch when router was previously enabled
+- [x] Implement optional LLM-based classifier for ambiguous routing cases
 
 ## Objective
 
@@ -424,4 +425,6 @@ No attempt to perfectly replicate vendor-specific internals.
 - Added a `/router-thinking` command to allow manually overriding the thinking level dynamically per-turn. The command supports overriding the thinking level for the current profile's current active tier, a specific tier of the current profile, or a specific tier of any profile.
 - Updated session persistence logic: thinking level overrides are now correctly saved and restored across sessions/restarts.
 - Adjusted session restoration logic on agent relaunch and session switch so that the `lastDecision` (previous routed model and thinking level) is intentionally *not* restored. This ensures the router status properly shows "waiting" initially instead of displaying outdated routing information from previous turns.
-- Next step: explore optional classifier support and any additional routing controls now that manual override, widgets, thinking controls, and robust state persistence are in place.
+- Implemented optional LLM-based classifier support. When `classifierModel` is configured, the router calls this model to categorize the user's intent. The classifier output includes the chosen tier and a short reasoning, which is then used for routing if the classifier succeeds. Fast heuristics are used as a fallback if the classifier is unconfigured or fails.
+- Improved classifier robustness by handling different event types (e.g., `text_delta` from Google/Gemini models) during intent classification.
+- Next step: explore phase memory improvements and additional routing controls now that classifier support is in place.

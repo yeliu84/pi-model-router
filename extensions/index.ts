@@ -36,6 +36,7 @@ interface RouterProfile {
 interface RouterConfig {
 	defaultProfile?: string;
 	debug?: boolean;
+	classifierModel?: string;
 	profiles: Record<string, RouterProfile>;
 }
 
@@ -49,6 +50,7 @@ interface RoutingDecision {
 	reasoning: string;
 	thinking: ThinkingLevel;
 	timestamp: number;
+	isClassifier?: boolean;
 }
 
 interface RouterPersistedState {
@@ -146,6 +148,7 @@ function mergeConfig(base: RouterConfig, override: Partial<RouterConfig>): Route
 	return {
 		defaultProfile: override.defaultProfile ?? base.defaultProfile,
 		debug: override.debug ?? base.debug,
+		classifierModel: override.classifierModel ?? base.classifierModel,
 		profiles: mergedProfiles,
 	};
 }
@@ -153,12 +156,12 @@ function mergeConfig(base: RouterConfig, override: Partial<RouterConfig>): Route
 function parseCanonicalModelRef(value: string): { provider: string; modelId: string } {
 	const slashIndex = value.indexOf("/");
 	if (slashIndex === -1) {
-		throw new Error(`Invalid routed model reference \"${value}\". Expected \"provider/model\".`);
+		throw new Error(`Invalid model reference \"${value}\". Expected \"provider/model\".`);
 	}
 	const provider = value.slice(0, slashIndex).trim();
 	const modelId = value.slice(slashIndex + 1).trim();
 	if (!provider || !modelId) {
-		throw new Error(`Invalid routed model reference \"${value}\". Expected \"provider/model\".`);
+		throw new Error(`Invalid model reference \"${value}\". Expected \"provider/model\".`);
 	}
 	return { provider, modelId };
 }
@@ -228,10 +231,21 @@ function normalizeConfig(raw: RouterConfig): ConfigLoadResult {
 		defaultProfile = fallbackProfile;
 	}
 
+	let classifierModel = typeof raw.classifierModel === "string" ? raw.classifierModel.trim() : undefined;
+	if (classifierModel) {
+		try {
+			parseCanonicalModelRef(classifierModel);
+		} catch (error) {
+			warnings.push(`Invalid classifierModel: ${error instanceof Error ? error.message : String(error)}`);
+			classifierModel = undefined;
+		}
+	}
+
 	return {
 		config: {
 			defaultProfile,
 			debug: typeof raw.debug === "boolean" ? raw.debug : false,
+			classifierModel,
 			profiles: normalizedProfiles,
 		},
 		warnings,
@@ -348,6 +362,34 @@ function phaseForTier(tier: RouterTier): RouterPhase {
 	if (tier === "high") return "planning";
 	if (tier === "medium") return "implementation";
 	return "lightweight";
+}
+
+function buildRoutingDecision(
+	profileName: string,
+	profile: RouterProfile,
+	tier: RouterTier,
+	phase: RouterPhase,
+	reasoning: string,
+	thinkingOverrides?: RouterThinkingByTier,
+	isClassifier?: boolean,
+): RoutingDecision {
+	const routed = profile[tier];
+	const { provider, modelId } = parseCanonicalModelRef(routed.model);
+	const baseThinking = routed.thinking ?? (tier === "high" ? "high" : tier === "low" ? "low" : "medium");
+	const effectiveThinking = thinkingOverrides?.[tier] ?? baseThinking;
+
+	return {
+		profile: profileName,
+		tier,
+		phase,
+		targetProvider: provider,
+		targetModelId: modelId,
+		targetLabel: routed.model,
+		reasoning,
+		thinking: effectiveThinking,
+		timestamp: Date.now(),
+		isClassifier,
+	};
 }
 
 function decideRouting(
@@ -493,22 +535,74 @@ function decideRouting(
 		reasoning = "Detected a short bounded request.";
 	}
 
-	const routed = profile[tier];
-	const { provider, modelId } = parseCanonicalModelRef(routed.model);
-	const baseThinking = routed.thinking ?? (tier === "high" ? "high" : tier === "low" ? "low" : "medium");
-	const effectiveThinking = thinkingOverrides?.[tier] ?? baseThinking;
+	return buildRoutingDecision(profileName, profile, tier, phase, reasoning, thinkingOverrides, false);
+}
 
-	return {
-		profile: profileName,
-		tier,
-		phase,
-		targetProvider: provider,
-		targetModelId: modelId,
-		targetLabel: routed.model,
-		reasoning,
-		thinking: effectiveThinking,
-		timestamp: Date.now(),
-	};
+async function runClassifier(
+	classifierModelRef: string,
+	modelRegistry: ExtensionContext["modelRegistry"],
+	context: Context,
+): Promise<{ tier: RouterTier; reasoning: string } | undefined> {
+	try {
+		const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
+		const model = modelRegistry.find(provider, modelId);
+		if (!model) return undefined;
+
+		const apiKey = await modelRegistry.getApiKey(model);
+		if (!apiKey) return undefined;
+
+		const promptText = getLastUserText(context);
+		const historyText = getRecentConversationText(context, 4);
+
+		const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
+
+Tiers:
+- high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.
+- medium: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.
+- low: Summaries, changelogs, formatting, quick explanations, small bounded transforms, simple read-only lookup.
+
+Recent history:
+${historyText}
+
+Latest user message:
+${promptText}
+
+Return your decision in exactly two lines:
+Tier: [high|medium|low]
+Reasoning: [one short sentence]`;
+
+		const classifierContext: Context = {
+			...context,
+			messages: [{ role: "user", content: classifierPrompt }],
+		};
+
+		const stream = streamSimple(model, classifierContext, { apiKey, reasoning: "off" });
+		let fullText = "";
+		for await (const event of stream) {
+			if (event.type === "chunk" && typeof (event as any).content === "string") {
+				fullText += (event as any).content;
+			} else if (event.type === "text_delta" && typeof (event as any).delta === "string") {
+				fullText += (event as any).delta;
+			}
+		}
+
+		const lines = fullText.trim().split("\n");
+		const tierLine = lines.find((l) => l.toLowerCase().startsWith("tier:"));
+		const reasoningLine = lines.find((l) => l.toLowerCase().startsWith("reasoning:"));
+
+		if (tierLine) {
+			const tierValue = tierLine.split(":")[1].trim().toLowerCase();
+			if (isRouterTier(tierValue)) {
+				return {
+					tier: tierValue,
+					reasoning: reasoningLine ? reasoningLine.split(":")[1].trim() : "Classifier decision.",
+				};
+			}
+		}
+	} catch (error) {
+		// Ignore classifier errors and fall back to heuristics
+	}
+	return undefined;
 }
 
 function formatDecision(decision: RoutingDecision): string {
@@ -776,7 +870,13 @@ export default function routerExtension(pi: ExtensionAPI) {
 		ctx.ui.setWidget("router", widgetLines.map((line) => ctx.ui.theme.fg("dim", line)));
 	};
 
+	let isProviderRegistered = false;
+
 	const registerRouterProvider = () => {
+		if (isProviderRegistered) {
+			return;
+		}
+
 		const models = profileNames(currentConfig).map((name) => ({
 			id: name,
 			name: `Router ${name}`,
@@ -800,6 +900,7 @@ export default function routerExtension(pi: ExtensionAPI) {
 						if (!currentModelRegistry) {
 							throw new Error("Router provider not initialized yet. Wait for session_start and retry.");
 						}
+						// Always use the latest config, which might have been reloaded
 						const profile = currentConfig.profiles[model.id];
 						if (!profile) {
 							throw new Error(`Unknown router profile: ${model.id}`);
@@ -807,14 +908,47 @@ export default function routerExtension(pi: ExtensionAPI) {
 
 						selectedProfile = model.id;
 						routerEnabled = true;
-						const decision = decideRouting(
-							context,
-							model.id,
-							profile,
-							lastDecision,
-							getPinnedTierForProfile(model.id),
-							thinkingByProfile[model.id],
-						);
+
+						const pinnedTier = getPinnedTierForProfile(model.id);
+						let decision: RoutingDecision;
+
+						if (currentConfig.classifierModel && !pinnedTier) {
+							const classifierResult = await runClassifier(
+								currentConfig.classifierModel,
+								currentModelRegistry,
+								context,
+							);
+							if (classifierResult) {
+								decision = buildRoutingDecision(
+									model.id,
+									profile,
+									classifierResult.tier,
+									phaseForTier(classifierResult.tier),
+									`Classifier: ${classifierResult.reasoning}`,
+									thinkingByProfile[model.id],
+									true,
+								);
+							} else {
+								decision = decideRouting(
+									context,
+									model.id,
+									profile,
+									lastDecision,
+									pinnedTier,
+									thinkingByProfile[model.id],
+								);
+							}
+						} else {
+							decision = decideRouting(
+								context,
+								model.id,
+								profile,
+								lastDecision,
+								pinnedTier,
+								thinkingByProfile[model.id],
+							);
+						}
+
 						lastDecision = decision;
 						recordDebugDecision(decision);
 
@@ -857,6 +991,8 @@ export default function routerExtension(pi: ExtensionAPI) {
 				return stream;
 			},
 		});
+
+		isProviderRegistered = true;
 	};
 
 	const reloadConfig = (ctx?: ExtensionContext, options?: { preserveDebug?: boolean }) => {

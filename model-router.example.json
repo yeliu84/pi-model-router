@@ -1,6 +1,7 @@
 {
   "defaultProfile": "auto",
   "debug": false,
+  "classifierModel": "google/gemini-flash-latest",
   "profiles": {
     "auto": {
       "high": {

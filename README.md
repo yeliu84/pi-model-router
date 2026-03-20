@@ -68,18 +68,24 @@ Copy the example config to one of:
 
 ## Commands
 
-| Command                    | Description                                                                   |
-| -------------------------- | ----------------------------------------------------------------------------- |
-| `/router`                  | Show detailed status, current profile, spend, and settings.                   |
-| `/router-on [profile]`     | Enable the router (optionally switching to a specific profile).               |
-| `/router-off`              | Disable the router and switch back to the last non-router model.              |
-| `/router-profile <name>`   | Switch to a different router profile.                                         |
-| `/router-pin <tier\|auto>` | Force a specific tier for the current profile (or use `auto` for heuristics). |
-| `/router-fix <tier>`       | Correct the _last_ decision and pin that tier for the current profile.        |
-| `/router-thinking <lv>`    | Override the thinking level for the active tier.                              |
-| `/router-widget <on\|off>` | Toggle the persistent state widget.                                           |
-| `/router-debug <on\|off>`  | Toggle turn-by-turn routing notifications.                                    |
-| `/router-reload`           | Hot-reload the configuration JSON.                                            |
+| Command                      | Description                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `/router`                    | Show detailed status, current profile, spend, and settings.                                             |
+| `/router status`             | Alias for `/router` (show current status).                                                              |
+| `/router profile [name]`     | Switch to a profile or list available ones (enables router if off).                                     |
+| `/router pin [prof] <t\|a>`  | Pin a tier (high/medium/low/auto) for the current or specified profile.                                   |
+| `/router fix <tier>`         | Correct the _last_ decision and pin that tier for the current profile.                                   |
+| `/router thinking ...`       | Override thinking levels (e.g. `/router thinking low xhigh`).                                           |
+| `/router disable`            | Disable the router and switch back to the last non-router model.                                        |
+| `/router widget <on\|off>`   | Toggle the persistent state widget (supports `toggle`).                                                 |
+| `/router debug <on\|off>`    | Toggle turn-by-turn routing notifications (supports `toggle`, `clear`, `show`).                         |
+| `/router reload`             | Hot-reload the configuration JSON.                                                                      |
+| `/router help`               | Show usage help for all subcommands.                                                                    |
+
+## Documentation
+
+- [Architecture Guide](docs/ARCHITECTURE.md): Deep dive into the routing logic and modular design.
+- [Sample Configuration](model-router.example.json): Diverse profile examples (`cheap`, `deep`, `balanced`).
 
 ## Documentation
 

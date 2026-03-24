@@ -4,14 +4,17 @@ Status: Completed
 Last updated: 2026-03-20
 
 ## Objective
+
 Consolidate the model router’s command surface around a single `/router` entrypoint that exposes subcommands, folding functionality from `/router-on`, `/router-off`, `/router-fix`, `/router-widget`, `/router-debug`, `/router-reload`, and others into logical subcommands and removing unnecessary standalone commands.
 
 ## Motivation
+
 - Slash command proliferation increases cognitive load; keeping only `/router` keeps the UI simple while still surfacing all necessary controls via subcommands.
 - Subcommands allow clearer grouping (e.g., `/router profile`, `/router pin`, `/router widget`, `/router debug`) and align with the user’s stated preference.
 - Folding logic into one registered command avoids redundant command registration and makes help/status output easier to extend.
 
 ## Scope
+
 - [x] Replace distinct `/router-on`, `/router-off`, `/router-fix`, `/router-widget`, `/router-debug`, and `/router-reload` commands with subcommands handled by `/router`.
 - [x] Keep `/router-profile`, `/router-pin`, and `/router-thinking` semantics, but execute them via `/router profile …`, `/router pin …`, `/router thinking …` flows (with aliases if needed for compatibility).
 - [x] Provide `/router status` for the current status output, meaning `/router` without subcommands defaults to status.
@@ -19,6 +22,7 @@ Consolidate the model router’s command surface around a single `/router` entry
 - [x] Update documentation/comments to describe the new command layout and available subcommands.
 
 ## Proposed subcommand design
+
 1. `router` (no args) or `router status` → show status (current profile, pinned tier, cost, last decision, widget state). [DONE]
 2. `router profile [name]` → show available profiles if no name; otherwise switch to named profile (enabling router implicitly). [DONE]
 3. `router pin [profile] <tier|auto>` → set or clear pin for target profile. [DONE]
@@ -30,6 +34,7 @@ Consolidate the model router’s command surface around a single `/router` entry
 9. `router reload` → reload config while keeping debug preserved (formerly `/router-reload`). [DONE]
 
 ## Implementation steps
+
 1. [x] Sketch the new command parser: register only `/router` and switch on first argument (subcommand). Support `help`/`?` fallback to status.
 2. [x] Move existing standalone logic into subcommand-specific helper functions, reusing completions where practical.
 3. [x] Update `actions` props/persistance calls if the new handler needs to refer to `ctx` differently; ensure old command names either removed or kept as aliases for compatibility (optional).
@@ -39,11 +44,13 @@ Consolidate the model router’s command surface around a single `/router` entry
 7. [x] Update README and docs to explain the new subcommand usage (once plan approved).
 
 ## Risks & Mitigations
+
 - **Loss of backward compatibility:** Provide short-lived compatibility by handling old command names as redirects to `/router` subcommands if absolutely necessary, or document the change clearly.
 - **Command argument parsing regressions:** Rigorously reuse existing completion logic to avoid regression, adding unit-like tests for parser behavior if feasible.
 - **Inconsistent UI updates:** Ensure each subcommand calls `actions.updateStatus` and persists state similar to previous handlers.
 
 ## Next steps (post-approval)
+
 1. Implement `/router` subcommand parsing as described.
 2. Remove legacy command registrations and ensure old command names redirect or are no-ops.
 3. Update docs/README with the consolidated command list.

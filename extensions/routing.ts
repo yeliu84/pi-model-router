@@ -10,7 +10,9 @@ import type {
 } from './types';
 import { parseCanonicalModelRef, isRouterTier } from './config';
 
-export const extractTextFromContent = (content: string | Message['content']): string => {
+export const extractTextFromContent = (
+  content: string | Message['content'],
+): string => {
   if (typeof content === 'string') {
     return content;
   }
@@ -18,7 +20,8 @@ export const extractTextFromContent = (content: string | Message['content']): st
     .map((part) => {
       if (part.type === 'text') return part.text;
       if (part.type === 'thinking') return part.thinking;
-      if (part.type === 'toolCall') return `${part.name} ${JSON.stringify(part.arguments)}`;
+      if (part.type === 'toolCall')
+        return `${part.name} ${JSON.stringify(part.arguments)}`;
       return '';
     })
     .filter(Boolean)
@@ -35,7 +38,10 @@ export const getLastUserText = (context: Context): string => {
   return '';
 };
 
-export const getRecentConversationText = (context: Context, limit = 6): string => {
+export const getRecentConversationText = (
+  context: Context,
+  limit = 6,
+): string => {
   return context.messages
     .slice(-limit)
     .map((message) => extractTextFromContent(message.content).trim())
@@ -45,7 +51,8 @@ export const getRecentConversationText = (context: Context, limit = 6): string =
 };
 
 export const countToolResults = (context: Context): number => {
-  return context.messages.filter((message) => message.role === 'toolResult').length;
+  return context.messages.filter((message) => message.role === 'toolResult')
+    .length;
 };
 
 export const countWords = (text: string): number => {
@@ -55,7 +62,8 @@ export const countWords = (text: string): number => {
 export const hasImageAttachment = (context: Context): boolean => {
   return context.messages.some(
     (message) =>
-      Array.isArray(message.content) && message.content.some((part) => part.type === 'image'),
+      Array.isArray(message.content) &&
+      message.content.some((part) => part.type === 'image'),
   );
 };
 
@@ -81,7 +89,8 @@ export const buildRoutingDecision = (
   const routed = profile[tier];
   const { provider, modelId } = parseCanonicalModelRef(routed.model);
   const baseThinking =
-    routed.thinking ?? (tier === 'high' ? 'high' : tier === 'low' ? 'low' : 'medium');
+    routed.thinking ??
+    (tier === 'high' ? 'high' : tier === 'low' ? 'low' : 'medium');
   const effectiveThinking = thinkingOverrides?.[tier] ?? baseThinking;
 
   return {
@@ -210,11 +219,15 @@ export const decideRouting = (
     // Check custom rules first
     if (rules) {
       for (const rule of rules) {
-        const matches = Array.isArray(rule.matches) ? rule.matches : [rule.matches];
+        const matches = Array.isArray(rule.matches)
+          ? rule.matches
+          : [rule.matches];
         if (containsAny(prompt, matches)) {
           tier = rule.tier;
           phase = phaseForTier(tier);
-          reasoning = rule.reason ?? `Matched custom routing rule for: ${matches.join(', ')}`;
+          reasoning =
+            rule.reason ??
+            `Matched custom routing rule for: ${matches.join(', ')}`;
           isRuleMatched = true;
           break;
         }
@@ -230,7 +243,8 @@ export const decideRouting = (
       const lowThreshold = Math.max(
         4,
         12 -
-          (previousDecision?.phase === 'implementation' || previousDecision?.phase === 'planning'
+          (previousDecision?.phase === 'implementation' ||
+          previousDecision?.phase === 'planning'
             ? phaseBias * 8
             : 0),
       );
@@ -238,11 +252,13 @@ export const decideRouting = (
       if (containsAny(prompt, explicitHighHints)) {
         phase = 'planning';
         tier = 'high';
-        reasoning = 'Detected an explicit request for deeper or higher-quality reasoning.';
+        reasoning =
+          'Detected an explicit request for deeper or higher-quality reasoning.';
       } else if (containsAny(prompt, explicitLowHints)) {
         phase = 'lightweight';
         tier = 'low';
-        reasoning = 'Detected an explicit request for a faster or lighter response.';
+        reasoning =
+          'Detected an explicit request for a faster or lighter response.';
       } else if (containsAny(prompt, summaryKeywords)) {
         phase = 'lightweight';
         tier = 'low';
@@ -262,8 +278,13 @@ export const decideRouting = (
       } else if (containsAny(prompt, implementationKeywords)) {
         phase = 'implementation';
         tier = 'medium';
-        reasoning = 'Detected implementation-oriented work with bounded execution scope.';
-      } else if (containsAny(prompt, lookupKeywords) && wordCount <= 24 && toolResultCount === 0) {
+        reasoning =
+          'Detected implementation-oriented work with bounded execution scope.';
+      } else if (
+        containsAny(prompt, lookupKeywords) &&
+        wordCount <= 24 &&
+        toolResultCount === 0
+      ) {
         phase = 'lightweight';
         tier = 'low';
         reasoning = 'Detected a short read-only lookup request.';
@@ -361,23 +382,33 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
     const stream = streamSimple(model, classifierContext, { apiKey });
     let fullText = '';
     for await (const event of stream) {
-      if (event.type === 'chunk' && typeof (event as any).content === 'string') {
+      if (
+        event.type === 'chunk' &&
+        typeof (event as any).content === 'string'
+      ) {
         fullText += (event as any).content;
-      } else if (event.type === 'text_delta' && typeof (event as any).delta === 'string') {
+      } else if (
+        event.type === 'text_delta' &&
+        typeof (event as any).delta === 'string'
+      ) {
         fullText += (event as any).delta;
       }
     }
 
     const lines = fullText.trim().split('\n');
     const tierLine = lines.find((l) => l.toLowerCase().startsWith('tier:'));
-    const reasoningLine = lines.find((l) => l.toLowerCase().startsWith('reasoning:'));
+    const reasoningLine = lines.find((l) =>
+      l.toLowerCase().startsWith('reasoning:'),
+    );
 
     if (tierLine) {
       const tierValue = tierLine.split(':')[1].trim().toLowerCase();
       if (isRouterTier(tierValue)) {
         return {
           tier: tierValue,
-          reasoning: reasoningLine ? reasoningLine.split(':')[1].trim() : 'Classifier decision.',
+          reasoning: reasoningLine
+            ? reasoningLine.split(':')[1].trim()
+            : 'Classifier decision.',
         };
       }
     }

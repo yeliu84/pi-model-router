@@ -9,7 +9,10 @@ import {
   type SimpleStreamOptions,
   type Message,
 } from '@mariozechner/pi-ai';
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from '@mariozechner/pi-coding-agent';
 import type {
   RouterConfig,
   RoutingDecision,
@@ -27,7 +30,10 @@ import {
   hasImageAttachment,
 } from './routing';
 
-export const createErrorMessage = (model: Model<Api>, message: string): AssistantMessage => {
+export const createErrorMessage = (
+  model: Model<Api>,
+  message: string,
+): AssistantMessage => {
   return {
     role: 'assistant',
     content: [],
@@ -68,15 +74,21 @@ const truncateContext = (context: Context, limit: number): Context => {
   );
   if (totalTokens <= limit) return context;
 
-  const systemMessage = messages[0].role === 'system' ? messages.shift() : undefined;
+  const systemMessage =
+    messages[0].role === 'system' ? messages.shift() : undefined;
   const latestMessage = messages.pop()!; // The current turn
 
   // Remove oldest until it fits
   while (messages.length > 0) {
     const currentTokens =
-      (systemMessage ? estimateTokens(extractTextFromContent(systemMessage.content)) : 0) +
+      (systemMessage
+        ? estimateTokens(extractTextFromContent(systemMessage.content))
+        : 0) +
       estimateTokens(extractTextFromContent(latestMessage.content)) +
-      messages.reduce((sum, m) => sum + estimateTokens(extractTextFromContent(m.content)), 0);
+      messages.reduce(
+        (sum, m) => sum + estimateTokens(extractTextFromContent(m.content)),
+        0,
+      );
 
     if (currentTokens <= limit) break;
     messages.shift(); // Remove oldest
@@ -115,7 +127,9 @@ export const registerRouterProvider = (
   state: {
     lastRegisteredModels: string;
     readonly currentConfig: RouterConfig;
-    readonly currentModelRegistry: ExtensionContext['modelRegistry'] | undefined;
+    readonly currentModelRegistry:
+      | ExtensionContext['modelRegistry']
+      | undefined;
     readonly lastExtensionContext: ExtensionContext | undefined;
     selectedProfile: string;
     routerEnabled: boolean;
@@ -142,7 +156,9 @@ export const registerRouterProvider = (
     if (state.currentModelRegistry) {
       for (const tier of ROUTER_TIERS) {
         try {
-          const { provider, modelId } = parseCanonicalModelRef(profile[tier].model);
+          const { provider, modelId } = parseCanonicalModelRef(
+            profile[tier].model,
+          );
           const tierModel = state.currentModelRegistry.find(provider, modelId);
           if (tierModel) {
             if (tier === 'high') {
@@ -224,7 +240,9 @@ export const registerRouterProvider = (
           ) {
             try {
               const usage = await state.lastExtensionContext.getContextUsage();
-              if (usage.totalTokens > state.currentConfig.largeContextThreshold) {
+              if (
+                usage.totalTokens > state.currentConfig.largeContextThreshold
+              ) {
                 decision = buildRoutingDecision(
                   model.id,
                   profile,
@@ -311,7 +329,10 @@ export const registerRouterProvider = (
               }
             };
 
-            const tierModels = [decision.targetLabel, ...(profile[decision.tier].fallbacks ?? [])];
+            const tierModels = [
+              decision.targetLabel,
+              ...(profile[decision.tier].fallbacks ?? []),
+            ];
             if (!tierModels.some(checkModelSupportsImage)) {
               const tiersToTry: RouterTier[] =
                 decision.tier === 'low'
@@ -322,7 +343,10 @@ export const registerRouterProvider = (
 
               let foundTier: RouterTier | undefined;
               for (const t of tiersToTry) {
-                const tModels = [profile[t].model, ...(profile[t].fallbacks ?? [])];
+                const tModels = [
+                  profile[t].model,
+                  ...(profile[t].fallbacks ?? []),
+                ];
                 if (tModels.some(checkModelSupportsImage)) {
                   foundTier = t;
                   break;
@@ -350,7 +374,10 @@ export const registerRouterProvider = (
             actions.updateStatus(state.lastExtensionContext);
           }
 
-          let modelsToTry = [decision.targetLabel, ...(profile[decision.tier].fallbacks ?? [])];
+          let modelsToTry = [
+            decision.targetLabel,
+            ...(profile[decision.tier].fallbacks ?? []),
+          ];
           if (imageAttached) {
             modelsToTry = modelsToTry.filter((modelRef) => {
               try {
@@ -375,13 +402,19 @@ export const registerRouterProvider = (
 
             if (targetProvider === 'router') continue;
 
-            const targetModel = state.currentModelRegistry.find(targetProvider, targetModelId);
+            const targetModel = state.currentModelRegistry.find(
+              targetProvider,
+              targetModelId,
+            );
             if (!targetModel) {
-              lastError = new Error(`Routed model not found: ${targetProvider}/${targetModelId}`);
+              lastError = new Error(
+                `Routed model not found: ${targetProvider}/${targetModelId}`,
+              );
               continue;
             }
 
-            const apiKey = await state.currentModelRegistry.getApiKey(targetModel);
+            const apiKey =
+              await state.currentModelRegistry.getApiKey(targetModel);
             if (!apiKey) {
               lastError = new Error(
                 `No API key for routed model: ${targetProvider}/${targetModelId}`,
@@ -398,16 +431,26 @@ export const registerRouterProvider = (
                 effectiveContext = truncateContext(context, targetLimit);
               }
 
-              const thinkingOverride = actions.getThinkingOverride(model.id, decision.tier);
+              const thinkingOverride = actions.getThinkingOverride(
+                model.id,
+                decision.tier,
+              );
               const delegatedReasoning =
-                targetModel.reasoning && (thinkingOverride ?? decision.thinking) !== 'off'
+                targetModel.reasoning &&
+                (thinkingOverride ?? decision.thinking) !== 'off'
                   ? (thinkingOverride ?? decision.thinking)
                   : undefined;
-              const delegatedStream = streamSimple(targetModel, effectiveContext, {
-                ...options,
-                apiKey,
-                ...(delegatedReasoning ? { reasoning: delegatedReasoning } : {}),
-              });
+              const delegatedStream = streamSimple(
+                targetModel,
+                effectiveContext,
+                {
+                  ...options,
+                  apiKey,
+                  ...(delegatedReasoning
+                    ? { reasoning: delegatedReasoning }
+                    : {}),
+                },
+              );
 
               let contentReceived = false;
               for await (const event of delegatedStream) {
@@ -417,7 +460,8 @@ export const registerRouterProvider = (
                 }
                 if (event.type === 'error' && !contentReceived) {
                   throw new Error(
-                    (event as any).error?.errorMessage || 'Model failed before sending content.',
+                    (event as any).error?.errorMessage ||
+                      'Model failed before sending content.',
                   );
                 }
                 const isContent =
@@ -438,7 +482,10 @@ export const registerRouterProvider = (
           }
 
           if (!success) {
-            throw lastError || new Error('Failed to delegate to any model in the chain.');
+            throw (
+              lastError ||
+              new Error('Failed to delegate to any model in the chain.')
+            );
           }
 
           stream.end();

@@ -1,4 +1,7 @@
-import type { ExtensionAPI, ExtensionContext } from '@mariozechner/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from '@mariozechner/pi-coding-agent';
 import {
   type RouterConfig,
   type RouterPersistedState,
@@ -28,7 +31,10 @@ const routerExtension = (pi: ExtensionAPI) => {
   let lastDecision: RoutingDecision | undefined;
   let debugEnabled = false;
   let routerEnabled = false;
-  let selectedProfile = resolveProfileName(FALLBACK_CONFIG, FALLBACK_CONFIG.defaultProfile);
+  let selectedProfile = resolveProfileName(
+    FALLBACK_CONFIG,
+    FALLBACK_CONFIG.defaultProfile,
+  );
   let widgetEnabled = false;
   let lastRegisteredModels = '';
   let pinnedTierByProfile: RouterPinByProfile = {};
@@ -42,7 +48,9 @@ const routerExtension = (pi: ExtensionAPI) => {
   let isInitialized = false;
   let isInternalModelSwitch = false;
 
-  const setModelInternally = async (model: NonNullable<ExtensionContext['model']>) => {
+  const setModelInternally = async (
+    model: NonNullable<ExtensionContext['model']>,
+  ) => {
     isInternalModelSwitch = true;
     try {
       return await pi.setModel(model);
@@ -51,10 +59,14 @@ const routerExtension = (pi: ExtensionAPI) => {
     }
   };
 
-  const getPinnedTierForProfile = (profileName: string): RouterTier | undefined =>
-    pinnedTierByProfile[profileName];
+  const getPinnedTierForProfile = (
+    profileName: string,
+  ): RouterTier | undefined => pinnedTierByProfile[profileName];
 
-  const setPinnedTierForProfile = (profileName: string, tier: RouterTier | undefined) => {
+  const setPinnedTierForProfile = (
+    profileName: string,
+    tier: RouterTier | undefined,
+  ) => {
     if (tier) {
       pinnedTierByProfile[profileName] = tier;
     } else {
@@ -86,8 +98,13 @@ const routerExtension = (pi: ExtensionAPI) => {
     const snapshot = JSON.stringify({
       ...state,
       timestamp: 0,
-      lastDecision: state.lastDecision ? { ...state.lastDecision, timestamp: 0 } : undefined,
-      debugHistory: state.debugHistory?.map((decision) => ({ ...decision, timestamp: 0 })),
+      lastDecision: state.lastDecision
+        ? { ...state.lastDecision, timestamp: 0 }
+        : undefined,
+      debugHistory: state.debugHistory?.map((decision) => ({
+        ...decision,
+        timestamp: 0,
+      })),
     });
     if (snapshot === lastPersistedSnapshot) {
       return;
@@ -111,7 +128,10 @@ const routerExtension = (pi: ExtensionAPI) => {
         widgetEnabled,
         currentConfig,
       ),
-    reloadConfig: (ctx?: ExtensionContext, options?: { preserveDebug?: boolean }) => {
+    reloadConfig: (
+      ctx?: ExtensionContext,
+      options?: { preserveDebug?: boolean },
+    ) => {
       const loaded = loadRouterConfig(currentCwd);
       currentConfig = loaded.config;
       lastConfigWarnings = loaded.warnings;
@@ -134,11 +154,17 @@ const routerExtension = (pi: ExtensionAPI) => {
         return;
       }
 
-      const fallbackProfile = resolveProfileName(currentConfig, selectedProfile);
+      const fallbackProfile = resolveProfileName(
+        currentConfig,
+        selectedProfile,
+      );
       const routerModel = ctx.modelRegistry.find('router', fallbackProfile);
       selectedProfile = fallbackProfile;
       if (!routerModel) {
-        ctx.ui.notify(`Router profile "${ctx.model.id}" is no longer configured.`, 'warning');
+        ctx.ui.notify(
+          `Router profile "${ctx.model.id}" is no longer configured.`,
+          'warning',
+        );
         return;
       }
 
@@ -148,7 +174,11 @@ const routerExtension = (pi: ExtensionAPI) => {
         'warning',
       );
     },
-    switchToRouterProfile: async (profileName: string, ctx: ExtensionContext, strict = true) => {
+    switchToRouterProfile: async (
+      profileName: string,
+      ctx: ExtensionContext,
+      strict = true,
+    ) => {
       if (strict && !currentConfig.profiles[profileName]) {
         ctx.ui.notify(`Unknown router profile: ${profileName}`, 'error');
         return false;
@@ -263,15 +293,25 @@ const routerExtension = (pi: ExtensionAPI) => {
 
     const entries = ctx.sessionManager.getBranch() as CustomSessionEntry[];
     const savedState = entries
-      .filter((entry) => entry.type === 'custom' && entry.customType === 'router-state')
+      .filter(
+        (entry) =>
+          entry.type === 'custom' && entry.customType === 'router-state',
+      )
       .map((entry) => entry.data)
       .findLast((data) => isRouterPersistedState(data));
 
     if (isRouterPersistedState(savedState)) {
-      selectedProfile = resolveProfileName(currentConfig, savedState.selectedProfile);
+      selectedProfile = resolveProfileName(
+        currentConfig,
+        savedState.selectedProfile,
+      );
       routerEnabled = savedState.enabled;
-      pinnedTierByProfile = savedState.pinByProfile ? { ...savedState.pinByProfile } : {};
-      thinkingByProfile = savedState.thinkingByProfile ? { ...savedState.thinkingByProfile } : {};
+      pinnedTierByProfile = savedState.pinByProfile
+        ? { ...savedState.pinByProfile }
+        : {};
+      thinkingByProfile = savedState.thinkingByProfile
+        ? { ...savedState.thinkingByProfile }
+        : {};
       if (savedState.pinTier) {
         pinnedTierByProfile[selectedProfile] = savedState.pinTier;
       }
@@ -291,7 +331,10 @@ const routerExtension = (pi: ExtensionAPI) => {
       if (routerModel) {
         const success = await setModelInternally(routerModel);
         if (!success) {
-          ctx.ui.notify(`Failed to restore router/${selectedProfile} after relaunch.`, 'warning');
+          ctx.ui.notify(
+            `Failed to restore router/${selectedProfile} after relaunch.`,
+            'warning',
+          );
           routerEnabled = false;
         }
       } else {

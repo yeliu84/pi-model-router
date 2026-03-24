@@ -25,14 +25,18 @@ export const formatDecision = (decision: RoutingDecision): string => {
   return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})`;
 };
 
-export const formatPinSummary = (pinnedTierByProfile: RouterPinByProfile): string => {
+export const formatPinSummary = (
+  pinnedTierByProfile: RouterPinByProfile,
+): string => {
   const entries = Object.entries(pinnedTierByProfile)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([profile, tier]) => `${profile}:${tier}`);
   return entries.length > 0 ? entries.join(', ') : 'none';
 };
 
-export const formatThinkingSummary = (thinkingByProfile: RouterThinkingByProfile): string => {
+export const formatThinkingSummary = (
+  thinkingByProfile: RouterThinkingByProfile,
+): string => {
   const entries = Object.entries(thinkingByProfile)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([profile, tierMap]) => {
@@ -67,7 +71,8 @@ export const updateStatus = (
 
   let statusText: string;
   if (activeRouterProfile) {
-    const matchesProfile = lastDecision && lastDecision.profile === activeRouterProfile;
+    const matchesProfile =
+      lastDecision && lastDecision.profile === activeRouterProfile;
     const matchesPin = activePin ? lastDecision?.tier === activePin : true;
 
     if (lastDecision && matchesProfile && matchesPin) {
@@ -95,10 +100,16 @@ export const updateStatus = (
     `Profile: ${statusProfile}${activeRouterProfile ? ' (active)' : ''}`,
     `Pin: ${activePin ?? 'auto'}`,
     `Cost: $${accumulatedCost.toFixed(4)}` +
-      (currentConfig.maxSessionBudget ? ` / $${currentConfig.maxSessionBudget.toFixed(2)}` : ''),
+      (currentConfig.maxSessionBudget
+        ? ` / $${currentConfig.maxSessionBudget.toFixed(2)}`
+        : ''),
   ];
   if (lastDecision && lastDecision.profile === statusProfile) {
-    const effectiveThinking = getEffectiveThinking(thinkingByProfile, statusProfile, lastDecision);
+    const effectiveThinking = getEffectiveThinking(
+      thinkingByProfile,
+      statusProfile,
+      lastDecision,
+    );
     const flags = getDecisionFlags(lastDecision);
     const flagsStr = flags.length > 0 ? ` [${flags.join(',')}]` : '';
 

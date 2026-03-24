@@ -5,7 +5,9 @@ import type {
   RouterPersistedState,
 } from './types';
 
-export const isRouterPersistedState = (value: unknown): value is RouterPersistedState => {
+export const isRouterPersistedState = (
+  value: unknown,
+): value is RouterPersistedState => {
   if (typeof value !== 'object' || value === null) {
     return false;
   }

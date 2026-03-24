@@ -52,4 +52,3 @@ The router state is persisted using `pi.appendEntry` with a custom type `router-
 ## Reliability: Fallback Chains
 
 Each tier in a profile can define an optional `fallbacks` list. If the primary model fails (e.g., due to rate limits or provider downtime), the router automatically retries the next model in the chain before surfacing an error to the user.
-

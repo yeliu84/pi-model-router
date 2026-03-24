@@ -34,8 +34,14 @@
       "low": { "model": "google/gemini-flash-latest", "thinking": "low" }
     },
     "anthropic": {
-      "high": { "model": "anthropic/claude-3-5-sonnet-20241022", "thinking": "high" },
-      "medium": { "model": "anthropic/claude-3-5-sonnet-20241022", "thinking": "medium" },
+      "high": {
+        "model": "anthropic/claude-3-5-sonnet-20241022",
+        "thinking": "high"
+      },
+      "medium": {
+        "model": "anthropic/claude-3-5-sonnet-20241022",
+        "thinking": "medium"
+      },
       "low": { "model": "anthropic/claude-3-haiku-20240307", "thinking": "low" }
     }
   }

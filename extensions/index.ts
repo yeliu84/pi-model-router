@@ -228,6 +228,7 @@ const routerExtension = (pi: ExtensionAPI) => {
           persistState,
           recordDebugDecision,
           getThinkingOverride,
+          updateStatus: actions.updateStatus,
         },
       );
     },

@@ -128,6 +128,7 @@ export const registerRouterProvider = (
     persistState: () => void;
     recordDebugDecision: (decision: RoutingDecision) => void;
     getThinkingOverride: (profileName: string, tier: RouterTier) => any;
+    updateStatus: (ctx: ExtensionContext) => void;
   },
 ) => {
   const profileList = profileNames(state.currentConfig);
@@ -344,6 +345,10 @@ export const registerRouterProvider = (
 
           state.lastDecision = decision;
           actions.recordDebugDecision(decision);
+
+          if (state.lastExtensionContext) {
+            actions.updateStatus(state.lastExtensionContext);
+          }
 
           let modelsToTry = [decision.targetLabel, ...(profile[decision.tier].fallbacks ?? [])];
           if (imageAttached) {

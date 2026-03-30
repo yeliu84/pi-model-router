@@ -347,8 +347,10 @@ export const runClassifier = async (
     const model = modelRegistry.find(provider, modelId);
     if (!model) return undefined;
 
-    const apiKey = await modelRegistry.getApiKey(model);
-    if (!apiKey) return undefined;
+    const auth = await modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok || !auth.apiKey) return undefined;
+    const apiKey = auth.apiKey;
+    const headers = auth.headers;
 
     const promptText = getLastUserText(context);
     const historyText = getRecentConversationText(context, 4);
@@ -379,7 +381,7 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
       messages: [{ role: 'user', content: classifierPrompt, timestamp: Date.now() }],
     };
 
-    const stream = streamSimple(model, classifierContext, { apiKey });
+    const stream = streamSimple(model, classifierContext, { apiKey, headers });
     let fullText = '';
     for await (const event of stream) {
       if (

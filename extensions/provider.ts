@@ -415,14 +415,18 @@ export const registerRouterProvider = (
               continue;
             }
 
-            const apiKey =
-              await state.currentModelRegistry.getApiKey(targetModel);
-            if (!apiKey) {
+            const auth =
+              await state.currentModelRegistry.getApiKeyAndHeaders(targetModel);
+            if (!auth.ok || !auth.apiKey) {
               lastError = new Error(
-                `No API key for routed model: ${targetProvider}/${targetModelId}`,
+                auth.ok
+                  ? `No API key for routed model: ${targetProvider}/${targetModelId}`
+                  : `Auth failed for routed model: ${targetProvider}/${targetModelId}: ${auth.error}`,
               );
               continue;
             }
+            const apiKey = auth.apiKey;
+            const headers = auth.headers;
 
             try {
               // HONESTY CHECK & AUTO-TRUNCATION
@@ -448,6 +452,7 @@ export const registerRouterProvider = (
                 {
                   ...options,
                   apiKey,
+                  headers,
                   ...(delegatedReasoning
                     ? { reasoning: delegatedReasoning }
                     : {}),

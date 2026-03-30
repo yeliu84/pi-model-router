@@ -446,6 +446,17 @@ export const registerRouterProvider = (
                 (thinkingOverride ?? decision.thinking) !== 'off'
                   ? (thinkingOverride ?? decision.thinking)
                   : undefined;
+
+              if (state.lastExtensionContext) {
+                if (delegatedReasoning) {
+                  state.lastExtensionContext.ui.setHiddenThinkingLabel?.(
+                    `Thinking (${targetProvider}/${targetModelId})...`,
+                  );
+                } else {
+                  state.lastExtensionContext.ui.setHiddenThinkingLabel?.();
+                }
+              }
+
               const delegatedStream = streamSimple(
                 targetModel,
                 effectiveContext,

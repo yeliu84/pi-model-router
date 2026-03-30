@@ -343,7 +343,10 @@ const routerExtension = (pi: ExtensionAPI) => {
           'warning',
         );
         routerEnabled = false;
+        ctx.ui.setHiddenThinkingLabel?.();
       }
+    } else {
+      ctx.ui.setHiddenThinkingLabel?.();
     }
 
     persistState();
@@ -433,6 +436,7 @@ const routerExtension = (pi: ExtensionAPI) => {
     } else {
       routerEnabled = false;
       lastNonRouterModel = `${event.model.provider}/${event.model.id}`;
+      ctx.ui.setHiddenThinkingLabel?.();
     }
     persistState();
     actions.updateStatus(ctx);

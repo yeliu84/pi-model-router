@@ -19,7 +19,17 @@ Intelligent per-turn model router extension for the [pi](https://github.com/mari
 
 ## Installation
 
-From this project directory:
+### As a user
+
+Install from npm:
+
+```bash
+pi install npm:@yeliu84/pi-model-router
+```
+
+### For development
+
+Clone this repo and install from source:
 
 ```bash
 pi install .

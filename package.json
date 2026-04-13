@@ -1,24 +1,38 @@
 {
   "name": "pi-model-router",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Configurable model router extension for pi coding agent",
+  "description": "Intelligent per-turn model router extension for the pi coding agent",
   "keywords": [
     "pi-package",
     "pi",
     "model-router",
     "llm",
-    "coding-agent"
+    "coding-agent",
+    "extension"
   ],
   "license": "MIT",
+  "author": "Ye Liu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yeliu84/pi-model-router.git"
+  },
+  "homepage": "https://github.com/yeliu84/pi-model-router#readme",
+  "bugs": {
+    "url": "https://github.com/yeliu84/pi-model-router/issues"
+  },
+  "exports": {
+    ".": "./extensions/index.ts"
+  },
   "pi": {
     "extensions": [
       "./extensions/index.ts"
     ]
   },
   "scripts": {
-    "tsc": "tsc --noEmit"
+    "tsc": "tsc --noEmit",
+    "build": "tsc",
+    "prepublishOnly": "npm run tsc"
   },
   "peerDependencies": {
     "@mariozechner/pi-agent-core": "*",

@@ -18,15 +18,29 @@ The extension uses `pi.registerProvider` to hook into the `pi` model lifecycle. 
 
 ## Routing Decision Flow
 
-For every request sent to a `router/*` model, the following logic is executed:
+For every request sent to a `router/*` model, the following logic is executed in order:
 
-1. **Budget Check**: If a `maxSessionBudget` is configured and the session spend exceeds it, the router automatically downgrades `high` tier requests to `medium`.
-2. **Context Trigger**: If `largeContextThreshold` is exceeded (measured in tokens), the router forces the `high` tier to ensure the model can handle the large context.
-3. **Manual Pin**: If the user has pinned a tier via `/router pin` or `/router fix`, that tier is used.
-4. **Custom Rules**: Keyword-based rules defined in the config are checked against the user prompt.
-5. **LLM Classifier (Optional)**: If `classifierModel` is configured, a fast LLM is called to categorize the user's intent.
-6. **Heuristics (Fallback)**: If the classifier is off or fails, a fast local heuristic (keyword/length/tool-use analysis) is used.
-7. **Biased Stickiness**: The `phaseBias` setting modulates thresholds to keep the router in a consistent phase (e.g., staying in `high` tier during a multi-turn planning session).
+### Decision Phase (inside `decideRouting()`)
+
+1. **Manual Pin**: If the user has pinned a tier via `/router pin` or `/router fix`, that tier is used immediately. No further routing logic runs.
+2. **Custom Rules**: Keyword-based rules defined in the config are checked against the user prompt. If any match, the configured tier is used.
+3. **Heuristics + Phase Bias**: A fast local analysis considers word count, keywords, explicit hints, tool results, multi-line prompts, conversation history, and the previous phase. The `phaseBias` setting modulates thresholds to keep the router in a consistent phase (e.g., staying in `high` tier during a multi-turn planning session; making it harder to drop to `low` during implementation).
+4. **Budget Check**: If a `maxSessionBudget` is configured and the accumulated session spend exceeds it, any `high` tier decision is automatically downgraded to `medium`.
+
+### Post-Heuristic Overrides (in `provider.ts`)
+
+5. **Context Trigger** (optional): If `largeContextThreshold` is exceeded (measured in tokens via `ctx.getContextUsage()`), the router **upgrades** to the `high` tier regardless of the heuristic decision. This only upgrades — it never downgrades.
+6. **LLM Classifier** (optional): If `classifierModel` is configured **and** no pin is set, no rule matched, and no context trigger fired, a fast LLM is called to categorize the user's intent. Its decision overrides the heuristic result. If the classifier chooses `high` but the budget is exceeded, it is re-downgraded to `medium`.
+
+### Post-Route Corrections
+
+7. **Google Thinking Tool Continuation**: If the last message is a tool result and the previous turn used a Google model with thinking enabled, the exact same model/tier is preserved to avoid thought-signature replay errors — even if the heuristic would route differently.
+8. **Image-Aware Escalation**: If the user attached an image and the routed tier's model doesn't support image inputs, the router escalates to the next higher tier (`low → medium → high`) that supports images.
+
+### Execution Phase
+
+9. **Auto-Context Truncation**: Before delegation, if the target model's context window is smaller than what the router reported (always the `high` tier model's capacity), the conversation is truncated by removing oldest messages while preserving the system prompt and the most recent message.
+10. **Fallback Chain**: If the primary model fails (rate limit, downtime, auth error), the router retries each configured fallback in sequence. If all fail, the error is surfaced to the user.
 
 ## Module Architecture
 

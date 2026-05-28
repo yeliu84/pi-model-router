@@ -21,6 +21,12 @@
   "bugs": {
     "url": "https://github.com/yeliu84/pi-model-router/issues"
   },
+  "files": [
+    "extensions/",
+    "docs/ARCHITECTURE.md",
+    "model-router.example.json",
+    "README.md"
+  ],
   "exports": {
     ".": "./extensions/index.ts"
   },

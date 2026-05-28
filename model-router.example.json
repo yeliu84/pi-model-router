@@ -1,7 +1,11 @@
 {
   "defaultProfile": "auto",
   "debug": false,
-  "classifierModel": "google/gemini-flash-latest",
+  "classifierModel": "google/gemini-flash-lite-latest",
+  "classifierModelThinking": "off",
+  "classifierInitialContinuations": 2,
+  "classifierFailureTrigger": 2,
+  "classifierCadence": 10,
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
   "largeContextThreshold": 100000,

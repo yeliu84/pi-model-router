@@ -29,6 +29,10 @@ export interface RouterConfig {
   defaultProfile?: string;
   debug?: boolean;
   classifierModel?: string;
+  classifierModelThinking?: ThinkingLevel;
+  classifierInitialContinuations?: number; // How many initial tool continuations after a user message should run the classifier. Default: 1.
+  classifierFailureTrigger?: number; // How many failed tool results in a single turn trigger a classifier run. Default: 2.
+  classifierCadence?: number; // Run the classifier every Nth tool continuation during long chains. Default: 10.
   phaseBias?: number;
   largeContextThreshold?: number;
   maxSessionBudget?: number;
@@ -51,6 +55,7 @@ export interface RoutingDecision {
   isContextTriggered?: boolean;
   isBudgetForced?: boolean;
   isRuleMatched?: boolean;
+  classifierContCount?: number; // Tool-continuation count at which the classifier last ran (for cadence gating)
 }
 
 export interface RouterPersistedState {

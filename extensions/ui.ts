@@ -21,8 +21,22 @@ const getDecisionFlags = (decision: RoutingDecision): string[] => {
   return flags;
 };
 
+const formatRoutingDetails = (
+  decision: RoutingDecision,
+  thinkingByProfile: RouterThinkingByProfile,
+): string => {
+  const effectiveThinking = getEffectiveThinking(
+    thinkingByProfile,
+    decision.profile,
+    decision,
+  );
+  const flags = getDecisionFlags(decision);
+  const flagsStr = flags.length > 0 ? ` [${flags.join(',')}]` : '';
+  return `${decision.tier}${flagsStr} -> ${decision.targetProvider}/${decision.targetModelId} (${effectiveThinking})`;
+};
+
 export const formatDecision = (decision: RoutingDecision): string => {
-  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} [${decision.thinking}] (${decision.reasoning})`;
+  return `${decision.profile}: ${decision.tier} -> ${decision.targetProvider}/${decision.targetModelId} (${decision.thinking}) - ${decision.reasoning}`;
 };
 
 export const formatPinSummary = (
@@ -63,6 +77,8 @@ export const updateStatus = (
   accumulatedCost: number,
   widgetEnabled: boolean,
   currentConfig: RouterConfig,
+  debugEnabled?: boolean,
+  debugHistory?: RoutingDecision[],
 ) => {
   const activeRouterProfile = routerEnabled ? selectedProfile : undefined;
   const statusProfile = selectedProfile;
@@ -76,12 +92,7 @@ export const updateStatus = (
     const matchesPin = activePin ? lastDecision?.tier === activePin : true;
 
     if (lastDecision && matchesProfile && matchesPin) {
-      const effectiveThinking = getEffectiveThinking(
-        thinkingByProfile,
-        activeRouterProfile,
-        lastDecision,
-      );
-      statusText = `router:${activeRouterProfile}${pinLabel} -> ${lastDecision.tier} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`;
+      statusText = `router:${activeRouterProfile}${pinLabel} -> ${formatRoutingDetails(lastDecision, thinkingByProfile)}`;
     } else {
       statusText = `router:${activeRouterProfile}${pinLabel} -> waiting`;
     }
@@ -105,16 +116,8 @@ export const updateStatus = (
         : ''),
   ];
   if (lastDecision && lastDecision.profile === statusProfile) {
-    const effectiveThinking = getEffectiveThinking(
-      thinkingByProfile,
-      statusProfile,
-      lastDecision,
-    );
-    const flags = getDecisionFlags(lastDecision);
-    const flagsStr = flags.length > 0 ? ` [${flags.join(',')}]` : '';
-
     widgetLines.push(
-      `Route: ${lastDecision.tier}${flagsStr} -> ${lastDecision.targetProvider}/${lastDecision.targetModelId} (${effectiveThinking})`,
+      `Route: ${formatRoutingDetails(lastDecision, thinkingByProfile)}`,
       `Phase: ${lastDecision.phase}`,
     );
   } else if (!routerEnabled && lastNonRouterModel) {
@@ -123,6 +126,12 @@ export const updateStatus = (
   if (Object.keys(pinnedTierByProfile).length > 1) {
     widgetLines.push(`Pins: ${formatPinSummary(pinnedTierByProfile)}`);
   }
+  if (debugEnabled && debugHistory && debugHistory.length > 0) {
+    for (const d of [...debugHistory].reverse()) { // Most recent first so pi's truncation keeps the latest visible
+      widgetLines.push(`[debug-history] [${new Date(d.timestamp).toLocaleTimeString()}] ${formatDecision(d)}`,);
+    }
+  }
+
   ctx.ui.setWidget(
     'router',
     widgetLines.map((line) => ctx.ui.theme.fg('dim', line)),

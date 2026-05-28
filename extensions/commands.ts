@@ -39,6 +39,7 @@ export const registerCommands = (
     debugEnabled: boolean;
     widgetEnabled: boolean;
     readonly debugHistory: RoutingDecision[];
+    readonly lastConfigWarnings: string[];
   },
   actions: {
     persistState: () => void;
@@ -61,10 +62,7 @@ export const registerCommands = (
     { name: 'pin', desc: 'Pin routing for a profile to a specific tier' },
     { name: 'thinking', desc: 'Override thinking level for a tier or profile' },
     { name: 'disable', desc: 'Disable the router and restore last model' },
-    {
-      name: 'fix',
-      desc: 'Correct the last routing decision and pin that tier',
-    },
+    { name: 'fix', desc: 'Correct the last routing decision and pin that tier'},
     { name: 'widget', desc: 'Toggle the router status widget' },
     { name: 'debug', desc: 'Toggle or clear router debug history' },
     { name: 'reload', desc: 'Reload the model router configuration' },
@@ -411,6 +409,7 @@ export const registerCommands = (
     }
 
     actions.persistState();
+    pi.setThinkingLevel(nextLevel || 'off');
     actions.updateStatus(ctx);
     ctx.ui.notify(
       nextLevel
@@ -426,10 +425,7 @@ export const registerCommands = (
       return;
     }
     if (!state.lastNonRouterModel) {
-      ctx.ui.notify(
-        'No previous non-router model recorded. Use /model to pick a concrete model.',
-        'warning',
-      );
+      ctx.ui.notify('No previous non-router model recorded. Use /model to pick a concrete model.', 'warning');
       return;
     }
     const { provider, modelId } = parseCanonicalModelRef(
@@ -450,6 +446,7 @@ export const registerCommands = (
     }
     state.routerEnabled = false;
     actions.persistState();
+    pi.setThinkingLevel('off');
     actions.updateStatus(ctx);
     ctx.ui.notify(
       `Router disabled. Restored ${state.lastNonRouterModel}`,
@@ -523,6 +520,7 @@ export const registerCommands = (
       state.debugEnabled = !state.debugEnabled;
     }
     actions.persistState();
+    actions.updateStatus(ctx);
     ctx.ui.notify(
       `Router debug ${state.debugEnabled ? 'enabled' : 'disabled'}.`,
       'info',
@@ -536,6 +534,12 @@ export const registerCommands = (
     }
     actions.reloadConfig(ctx, { preserveDebug: true });
     await actions.ensureValidActiveRouterProfile(ctx);
+    actions.updateStatus(ctx);
+
+    if (state.lastConfigWarnings.length > 0) {
+      ctx.ui.notify(`Router reload warnings:\n${state.lastConfigWarnings.join('\n')}`, 'warning');
+    }
+
     ctx.ui.notify(
       `Router config reloaded. Profiles: ${profileNames(state.currentConfig).join(', ')}`,
       'info',

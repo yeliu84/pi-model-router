@@ -8,6 +8,7 @@ import type {
   RoutingRule,
   RouterThinkingByTier,
 } from './types';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import { parseCanonicalModelRef, isRouterTier } from './config';
 
 export const extractTextFromContent = (
@@ -30,9 +31,14 @@ export const extractTextFromContent = (
 
 export const getLastUserText = (context: Context): string => {
   for (let i = context.messages.length - 1; i >= 0; i--) {
-    const message = context.messages[i];
+    const message = context.messages[i] as Message;
     if (message.role === 'user') {
-      return extractTextFromContent(message.content).trim();
+      const content = extractTextFromContent(message.content).trim();
+      if (message.timestamp) {
+        const time = new Date(message.timestamp).toISOString();
+        return `[${time}] ${content}`;
+      }
+      return content;
     }
   }
   return '';
@@ -44,27 +50,68 @@ export const getRecentConversationText = (
 ): string => {
   return context.messages
     .slice(-limit)
-    .map((message) => extractTextFromContent(message.content).trim())
+    .map((message) => {
+      const time = message.timestamp ? `[${new Date(message.timestamp).toISOString()}] ` : '';
+
+      let rolePrefix: string;
+      const role = (message as Message).role;
+      switch (role) {
+        case 'user':
+          rolePrefix = 'User';
+          break;
+        case 'assistant':
+          rolePrefix = 'Assistant';
+          break;
+        case 'toolResult':
+          rolePrefix = 'Tool';
+          break;
+        default:
+          rolePrefix = role || 'Unknown';
+      }
+
+      const content = extractTextFromContent(message.content).trim();
+      if (!content) return '';
+
+      return `${time}${rolePrefix}: ${content}`;
+    })
     .filter(Boolean)
-    .join('\n')
-    .toLowerCase();
+    .join('\n\n');
 };
 
-export const countToolResults = (context: Context): number => {
-  return context.messages.filter((message) => message.role === 'toolResult')
-    .length;
+/** Count tool results since the last user message (current turn only). */
+export const countToolResultsSinceLastUserPrompt = (
+  context: Context,
+): number => {
+  let count = 0;
+  for (let i = context.messages.length - 1; i >= 0; i--) {
+    const msg = context.messages[i] as Message;
+    if (msg.role === 'user') break;
+    if (msg.role === 'toolResult') count++;
+  }
+  return count;
+};
+
+/** Count consecutive failed tool results from the tail of the current turn.
+ *  Resets to 0 as soon as a successful tool result is encountered. */
+export const countConsecutiveRecentToolFailures = (
+  context: Context,
+): number => {
+  let count = 0;
+  for (let i = context.messages.length - 1; i >= 0; i--) {
+    const msg = context.messages[i] as Message;
+    if (msg.role === 'user') break;
+    if (msg.role !== 'toolResult') continue;
+    if ((msg as any).isError) {
+      count++;
+    } else {
+      break; // success resets the chain
+    }
+  }
+  return count;
 };
 
 export const countWords = (text: string): number => {
   return text.split(/\s+/).filter(Boolean).length;
-};
-
-export const hasImageAttachment = (context: Context): boolean => {
-  return context.messages.some(
-    (message) =>
-      Array.isArray(message.content) &&
-      message.content.some((part) => part.type === 'image'),
-  );
 };
 
 export const containsAny = (text: string, keywords: string[]): boolean => {
@@ -120,7 +167,7 @@ export const decideRouting = (
 ): RoutingDecision => {
   const prompt = getLastUserText(context).toLowerCase();
   const recentConversation = getRecentConversationText(context);
-  const toolResultCount = countToolResults(context);
+  const toolResultCountSinceLastUserPrompt = countToolResultsSinceLastUserPrompt(context);
   const wordCount = countWords(prompt);
   const multiLinePrompt = prompt.split('\n').length >= 4;
 
@@ -252,13 +299,11 @@ export const decideRouting = (
       if (containsAny(prompt, explicitHighHints)) {
         phase = 'planning';
         tier = 'high';
-        reasoning =
-          'Detected an explicit request for deeper or higher-quality reasoning.';
+        reasoning = 'Detected an explicit request for deeper or higher-quality reasoning.';
       } else if (containsAny(prompt, explicitLowHints)) {
         phase = 'lightweight';
         tier = 'low';
-        reasoning =
-          'Detected an explicit request for a faster or lighter response.';
+        reasoning = 'Detected an explicit request for a faster or lighter response.';
       } else if (containsAny(prompt, summaryKeywords)) {
         phase = 'lightweight';
         tier = 'low';
@@ -278,34 +323,37 @@ export const decideRouting = (
       } else if (containsAny(prompt, implementationKeywords)) {
         phase = 'implementation';
         tier = 'medium';
-        reasoning =
-          'Detected implementation-oriented work with bounded execution scope.';
+        reasoning = 'Detected implementation-oriented work with bounded execution scope.';
       } else if (
         containsAny(prompt, lookupKeywords) &&
         wordCount <= 24 &&
-        toolResultCount === 0
+        toolResultCountSinceLastUserPrompt === 0
       ) {
         phase = 'lightweight';
         tier = 'low';
         reasoning = 'Detected a short read-only lookup request.';
       } else if (
         previousDecision?.phase === 'planning' &&
-        toolResultCount === 0 &&
+        toolResultCountSinceLastUserPrompt === 0 &&
         wordCount > lowThreshold
       ) {
         phase = 'planning';
         tier = 'high';
-        reasoning =
-          'Kept the planning-phase bias because the conversation still looks exploratory.';
+        reasoning = 'Kept the planning-phase bias because the conversation still looks exploratory.';
       } else if (
-        toolResultCount > 0 ||
         previousDecision?.phase === 'implementation' ||
         recentConversation.includes('plan:')
       ) {
         phase = 'implementation';
         tier = 'medium';
-        reasoning =
-          'Detected active implementation work from prior tools or recent plan execution context.';
+        const reasons: string[] = [];
+        if (previousDecision?.phase === 'implementation') {
+          reasons.push('continuation of implementation phase');
+        }
+        if (recentConversation.includes('plan:')) {
+          reasons.push('active plan detected in context');
+        }
+        reasoning = `Biasing to medium tier: ${reasons.join(', ')}.`;
       } else if (wordCount <= lowThreshold) {
         phase = 'lightweight';
         tier = 'low';
@@ -341,6 +389,7 @@ export const runClassifier = async (
   modelRegistry: ExtensionContext['modelRegistry'],
   context: Context,
   currentPhase?: RouterPhase,
+  thinking?: ThinkingLevel,
 ): Promise<{ tier: RouterTier; reasoning: string } | undefined> => {
   try {
     const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
@@ -352,36 +401,39 @@ export const runClassifier = async (
     const apiKey = auth.apiKey;
     const headers = auth.headers;
 
-    const promptText = getLastUserText(context);
     const historyText = getRecentConversationText(context, 4);
+    const promptText = getLastUserText(context);
 
-    const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
+    const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low". 
 
 Tiers:
-- high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.
-- medium: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.
-- low: Summaries, changelogs, formatting, quick explanations, small bounded transforms, simple read-only lookup.
+- high: Complex reasoning, architectural design, multi-step planning, tradeoff analysis, or resolving deep-rooted bugs that require a holistic understanding of the project. The high tier usually contains the most expensive models with highest thinking requirements and biggest context windows.
+- medium: Standard coding tasks, implementing well-defined features, multi-file edits, focused debugging, and writing tests within an established pattern. The medium tier usually contains balanced models with medium to high thinking requirements.
+- low: Routine tasks requiring no or minimal reasoning, such as summaries, changelogs, formatting, quick explanations, simple lookups, or small, bounded text transforms. The low tier usually contains cheaper models with no to low thinking requirements.
 
-${currentPhase ? `Current conversation phase: ${currentPhase}\n` : ''}
-Recent history:
+Recent history & tool results (The Context):
 ${historyText}
 
-Latest user message:
+Latest user message (The Intent):
 ${promptText}
 
 Return your decision in exactly two lines:
 Tier: [high|medium|low]
-Reasoning: [one short sentence]
+Reasoning: [one concise sentence summarizing the request's complexity and why it fits the tier]
 
+${currentPhase ? `Current conversation phase: ${currentPhase}` : ''}
 ${currentPhase === 'planning' ? 'Consider that the conversation is currently in a planning phase. Bias toward "high" unless the request is clearly a simple implementation or summary.' : ''}
 ${currentPhase === 'implementation' ? 'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.' : ''}`;
 
     const classifierContext: Context = {
-      ...context,
       messages: [{ role: 'user', content: classifierPrompt, timestamp: Date.now() }],
     };
 
-    const stream = streamSimple(model, classifierContext, { apiKey, headers });
+    const stream = streamSimple(model, classifierContext, {
+      apiKey,
+      headers,
+      ...(thinking && thinking !== 'off' ? { reasoning: thinking } : {}),
+    });
     let fullText = '';
     for await (const event of stream) {
       if (

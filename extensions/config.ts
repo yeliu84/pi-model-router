@@ -17,6 +17,7 @@ export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
 export const FALLBACK_CONFIG: RouterConfig = {
   defaultProfile: 'auto',
   debug: false,
+  classifierModelThinking: 'off',
   profiles: {
     auto: {
       high: { model: 'openai/gpt-5.4-pro', thinking: 'off' },
@@ -26,14 +27,7 @@ export const FALLBACK_CONFIG: RouterConfig = {
   },
 };
 
-export const THINKING_LEVELS: readonly ThinkingLevel[] = [
-  'off',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-];
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 export const ROUTER_PIN_VALUES = ['auto', 'high', 'medium', 'low'] as const;
 
 export const isObjectRecord = (
@@ -98,6 +92,8 @@ export const mergeConfig = (
     defaultProfile: override.defaultProfile ?? base.defaultProfile,
     debug: override.debug ?? base.debug,
     classifierModel: override.classifierModel ?? base.classifierModel,
+    classifierModelThinking:
+      override.classifierModelThinking ?? base.classifierModelThinking,
     phaseBias: override.phaseBias ?? base.phaseBias,
     largeContextThreshold:
       override.largeContextThreshold ?? base.largeContextThreshold,
@@ -295,11 +291,17 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
     }
   }
 
+  const classifierModelThinking = isThinkingLevel(raw.classifierModelThinking) ? raw.classifierModelThinking : FALLBACK_CONFIG.classifierModelThinking;
+  if (raw.classifierModelThinking !== undefined && !isThinkingLevel(raw.classifierModelThinking)) {
+    warnings.push(`Invalid classifierModelThinking value "${raw.classifierModelThinking}". Falling back to "${FALLBACK_CONFIG.classifierModelThinking}".`);
+  }
+
   return {
     config: {
       defaultProfile,
       debug: typeof raw.debug === 'boolean' ? raw.debug : false,
       classifierModel,
+      classifierModelThinking,
       phaseBias,
       largeContextThreshold,
       maxSessionBudget,

@@ -181,6 +181,57 @@ describe('provider.ts', () => {
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
+    it('should use the registered provider stream for custom APIs', async () => {
+      const customStreamSimple = vi.fn().mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'custom answer' };
+        })() as unknown as ReturnType<typeof streamSimple>,
+      );
+      vi.mocked(streamSimple).mockReturnValue(
+        (async function* () {
+          yield { type: 'text_delta', delta: 'compat answer' };
+        })() as unknown as ReturnType<typeof streamSimple>,
+      );
+      mockState.currentConfig.profiles.balanced.high = {
+        model: 'custom/custom-model',
+      };
+      mockState.pinnedTierByProfile.balanced = 'high';
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) => ({
+        api: 'custom-api' as Api,
+        provider,
+        id: modelId,
+        input: ['text'] as const,
+      }) as unknown as Model<Api>;
+      Object.assign(mockState.currentModelRegistry!, {
+        getRegisteredProviderConfig: vi.fn().mockReturnValue({
+          api: 'custom-api',
+          streamSimple: customStreamSimple,
+        }),
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const stream = new MockEventStream();
+      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
+        stream as unknown as AssistantMessageEventStream,
+      );
+      const model = {
+        id: 'balanced',
+        api: 'router-api' as Api,
+        provider: 'router',
+      } as unknown as Model<Api>;
+      const context = {
+        messages: [{ role: 'user', content: 'hello' }],
+      } as unknown as Context;
+
+      registeredProviderOptions!.streamSimple(model, context);
+
+      await vi.waitFor(() => expect(customStreamSimple).toHaveBeenCalledOnce());
+      expect(streamSimple).not.toHaveBeenCalled();
+    });
+
     it('should try fallbacks if the primary model fails', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
       const stream = new MockEventStream();

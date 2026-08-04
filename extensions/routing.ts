@@ -11,6 +11,7 @@ import type {
   RouterThinkingByTier,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier } from './config';
+import { resolveDelegatedModel, type RegistryWithProviderAuth } from './constants';
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -403,6 +404,16 @@ export const runClassifier = async (
     const apiKey = auth.apiKey;
     const headers = auth.headers;
 
+    // getApiKeyAndHeaders() does not surface a credential-specific baseUrl.
+    // Some OAuth providers (e.g. GitHub Copilot business/enterprise tenants)
+    // resolve a per-token proxy endpoint that differs from the model's static
+    // baseUrl; without applying it, this request fails with 421 Misdirected
+    // Request.
+    const requestModel = await resolveDelegatedModel(
+      modelRegistry as unknown as RegistryWithProviderAuth,
+      model,
+    );
+
     const promptText = getLastUserText(context);
     const historyText = getRecentConversationText(context, 4);
 
@@ -437,7 +448,7 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
         ? thinking
         : undefined;
 
-    const stream = streamSimple(model, classifierContext, {
+    const stream = streamSimple(requestModel, classifierContext, {
       apiKey,
       headers,
       ...(reasoningOption ? { reasoning: reasoningOption } : {}),

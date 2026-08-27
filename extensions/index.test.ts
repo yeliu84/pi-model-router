@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import routerExtension from './index';
 
+const stateMocks = vi.hoisted(() => ({
+  loadLastRouterProfile: vi.fn(),
+  saveLastRouterProfile: vi.fn(),
+}));
+
+vi.mock('./state', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./state')>()),
+  loadLastRouterProfile: stateMocks.loadLastRouterProfile,
+  saveLastRouterProfile: stateMocks.saveLastRouterProfile,
+}));
+
 vi.mock('./config', () => ({
   loadRouterConfig: () => ({
     config: {
@@ -9,13 +20,19 @@ vi.mock('./config', () => ({
           high: { model: 'openai/gpt-4o' },
           medium: { model: 'openai/gpt-4o-mini' },
         },
+        alternate: {
+          high: { model: 'anthropic/claude-opus-4' },
+          medium: { model: 'anthropic/claude-sonnet-4' },
+        },
       },
     },
     warnings: [],
   }),
-  profileNames: () => ['balanced'],
-  resolveProfileName: (config: unknown, name: unknown) =>
-    name === 'balanced' ? 'balanced' : undefined,
+  profileNames: () => ['alternate', 'balanced'],
+  resolveProfileName: (
+    config: { profiles: Record<string, unknown> },
+    name: unknown,
+  ) => (typeof name === 'string' && config.profiles[name] ? name : undefined),
   parseCanonicalModelRef: (_ref: string) => ({
     provider: 'openai',
     modelId: 'gpt-4o',
@@ -43,6 +60,10 @@ describe('index.ts (orchestrator)', () => {
 
   beforeEach(() => {
     eventListeners = {};
+    stateMocks.loadLastRouterProfile.mockReset();
+    stateMocks.loadLastRouterProfile.mockReturnValue(undefined);
+    stateMocks.saveLastRouterProfile.mockReset();
+    stateMocks.saveLastRouterProfile.mockReturnValue(true);
     mockPi = {
       registerProvider: vi.fn(),
       registerCommand: vi.fn(),
@@ -149,6 +170,7 @@ describe('index.ts (orchestrator)', () => {
     }
 
     expect(mockCtx.ui.setStatus).toHaveBeenCalled();
+    expect(stateMocks.saveLastRouterProfile).toHaveBeenCalledWith('balanced');
   });
 
   it('should enforce router model on turn_end hook', async () => {
@@ -341,6 +363,142 @@ describe('index.ts (orchestrator)', () => {
           selectedProfile: 'balanced',
         }),
       );
+    });
+
+    it('should restore the last profile for a new startup session', async () => {
+      stateMocks.loadLastRouterProfile.mockReturnValue('alternate');
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.modelRegistry.find = vi
+        .fn()
+        .mockImplementation((provider: string, id: string) => ({
+          provider,
+          id,
+        }));
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({ reason: 'startup' }, mockCtx);
+      }
+
+      expect(mockPi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'router', id: 'alternate' }),
+      );
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          enabled: true,
+          selectedProfile: 'alternate',
+        }),
+      );
+    });
+
+    it('should preserve an explicit CLI model selection', async () => {
+      stateMocks.loadLastRouterProfile.mockReturnValue('alternate');
+      routerExtension(mockPi);
+
+      const originalArgv = process.argv;
+      process.argv = [...originalArgv, '--model=router/balanced'];
+      try {
+        const mockCtx = buildMockCtx();
+        mockCtx.sessionManager.getBranch = () => [
+          {
+            type: 'custom',
+            customType: 'router-state',
+            data: {
+              enabled: true,
+              selectedProfile: 'alternate',
+              lastNonRouterModel: 'anthropic/claude-sonnet-4',
+              timestamp: Date.now(),
+            },
+          },
+        ];
+        const sessionStartHandlers = eventListeners['session_start'] || [];
+        for (const handler of sessionStartHandlers) {
+          await handler({ reason: 'startup' }, mockCtx);
+        }
+      } finally {
+        process.argv = originalArgv;
+      }
+
+      expect(stateMocks.loadLastRouterProfile).not.toHaveBeenCalled();
+      expect(mockPi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'router', id: 'balanced' }),
+      );
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          enabled: true,
+          selectedProfile: 'balanced',
+        }),
+      );
+    });
+
+    it('should not enable the router when Pi starts on a non-router model', async () => {
+      stateMocks.loadLastRouterProfile.mockReturnValue('alternate');
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({ reason: 'startup' }, mockCtx);
+      }
+
+      expect(stateMocks.loadLastRouterProfile).not.toHaveBeenCalled();
+      expect(mockPi.setModel).not.toHaveBeenCalled();
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({ enabled: false }),
+      );
+    });
+
+    it('should ignore a last profile that is no longer configured', async () => {
+      stateMocks.loadLastRouterProfile.mockReturnValue('removed');
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({ reason: 'startup' }, mockCtx);
+      }
+
+      expect(mockPi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'router', id: 'balanced' }),
+      );
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({ selectedProfile: 'balanced' }),
+      );
+    });
+
+    it('should prefer branch state over the cross-session profile', async () => {
+      stateMocks.loadLastRouterProfile.mockReturnValue('alternate');
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.sessionManager.getBranch = () => [
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            timestamp: Date.now(),
+          },
+        },
+      ];
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({ reason: 'startup' }, mockCtx);
+      }
+
+      expect(mockPi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'router', id: 'balanced' }),
+      );
+      expect(stateMocks.loadLastRouterProfile).not.toHaveBeenCalled();
     });
 
     it('should handle failed model restoration (setModel returns false)', async () => {
@@ -550,7 +708,10 @@ describe('index.ts (orchestrator)', () => {
       // Select router model to ensure routerEnabled=true
       const modelSelectHandlers = eventListeners['model_select'] || [];
       for (const handler of modelSelectHandlers) {
-        await handler({ model: { provider: 'router', id: 'balanced' } }, mockCtx);
+        await handler(
+          { model: { provider: 'router', id: 'balanced' } },
+          mockCtx,
+        );
       }
 
       // Clear mocks after initialization and model_select

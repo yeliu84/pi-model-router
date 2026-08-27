@@ -1,6 +1,7 @@
 import type {
   ExtensionAPI,
   ExtensionContext,
+  SessionStartEvent,
 } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
@@ -21,10 +22,20 @@ import {
   getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
-import { isRouterPersistedState, buildPersistedState } from './state';
+import {
+  isRouterPersistedState,
+  buildPersistedState,
+  loadLastRouterProfile,
+  saveLastRouterProfile,
+} from './state';
 import { updateStatus, formatModelRef } from './ui';
 import { registerCommands } from './commands';
 import { registerRouterProvider } from './provider';
+
+const hasExplicitCliModel = () =>
+  process.argv
+    .slice(2)
+    .some((arg) => arg === '--model' || arg.startsWith('--model='));
 
 const routerExtension = (pi: ExtensionAPI) => {
   let currentConfig: RouterConfig = { profiles: {} };
@@ -221,6 +232,7 @@ const routerExtension = (pi: ExtensionAPI) => {
       }
       selectedProfile = profileName;
       routerEnabled = true;
+      saveLastRouterProfile(profileName);
       persistState();
       actions.updateStatus(ctx);
       return true;
@@ -284,19 +296,25 @@ const routerExtension = (pi: ExtensionAPI) => {
 
   actions.reloadConfig();
 
-  const restoreStateFromSession = async (ctx: ExtensionContext) => {
+  const restoreStateFromSession = async (
+    ctx: ExtensionContext,
+    startReason: SessionStartEvent['reason'],
+  ) => {
     lastExtensionContext = ctx;
     currentModelRegistry = ctx.modelRegistry;
     currentCwd = ctx.cwd;
     actions.reloadConfig(ctx);
+    const hasExplicitStartupModel =
+      startReason === 'startup' && hasExplicitCliModel();
 
     // Give the registry a moment to synchronize after re-registration
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     routerEnabled = ctx.model?.provider === 'router';
-    selectedProfile = ctx.model?.provider === 'router'
-      ? resolveProfileName(currentConfig, ctx.model.id)
-      : resolveProfileName(currentConfig, selectedProfile);
+    selectedProfile =
+      ctx.model?.provider === 'router'
+        ? resolveProfileName(currentConfig, ctx.model.id)
+        : resolveProfileName(currentConfig, selectedProfile);
     // Clear in-place to keep references intact
     for (const key of Object.keys(pinnedTierByProfile)) {
       delete pinnedTierByProfile[key];
@@ -313,6 +331,8 @@ const routerExtension = (pi: ExtensionAPI) => {
         : lastNonRouterModel;
     lastDecision = undefined;
 
+    await actions.ensureValidActiveRouterProfile(ctx);
+
     const entries = ctx.sessionManager.getBranch() as CustomSessionEntry[];
     const savedState = entries
       .filter(
@@ -323,11 +343,13 @@ const routerExtension = (pi: ExtensionAPI) => {
       .findLast((data) => isRouterPersistedState(data));
 
     if (isRouterPersistedState(savedState)) {
-      selectedProfile = resolveProfileName(
-        currentConfig,
-        savedState.selectedProfile,
-      );
-      routerEnabled = savedState.enabled;
+      if (!hasExplicitStartupModel) {
+        selectedProfile = resolveProfileName(
+          currentConfig,
+          savedState.selectedProfile,
+        );
+        routerEnabled = savedState.enabled && selectedProfile !== undefined;
+      }
       if (savedState.pinByProfile) {
         Object.assign(pinnedTierByProfile, savedState.pinByProfile);
       }
@@ -342,12 +364,25 @@ const routerExtension = (pi: ExtensionAPI) => {
       debugHistory = savedState.debugHistory
         ? [...savedState.debugHistory].slice(-MAX_DEBUG_HISTORY)
         : [];
-      lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
+      if (!hasExplicitStartupModel) {
+        lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
+        lastDecision = savedState.lastDecision;
+      }
       accumulatedCost = savedState.accumulatedCost ?? 0;
-      lastDecision = savedState.lastDecision;
+    } else if (
+      ctx.model?.provider === 'router' &&
+      (startReason === 'startup' || startReason === 'new') &&
+      !hasExplicitStartupModel
+    ) {
+      const lastProfile = resolveProfileName(
+        currentConfig,
+        loadLastRouterProfile(),
+      );
+      if (lastProfile) {
+        selectedProfile = lastProfile;
+        routerEnabled = true;
+      }
     }
-
-    await actions.ensureValidActiveRouterProfile(ctx);
 
     if (routerEnabled && selectedProfile) {
       const routerModel = ctx.modelRegistry.find('router', selectedProfile);
@@ -433,9 +468,9 @@ const routerExtension = (pi: ExtensionAPI) => {
     actions,
   );
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event, ctx) => {
     isInitialized = true;
-    await restoreStateFromSession(ctx);
+    await restoreStateFromSession(ctx, event.reason);
     if (debugEnabled) {
       ctx.ui.notify(
         `Router initialized with profiles: ${profileNames(currentConfig).join(', ')}`,
@@ -489,6 +524,7 @@ const routerExtension = (pi: ExtensionAPI) => {
 
       routerEnabled = true;
       selectedProfile = profileName;
+      saveLastRouterProfile(profileName);
     } else {
       routerEnabled = false;
       lastNonRouterModel = `${event.model.provider}/${event.model.id}`;

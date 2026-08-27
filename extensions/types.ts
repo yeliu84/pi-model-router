@@ -71,6 +71,11 @@ export interface RoutingDecision {
   isRuleMatched?: boolean;
 }
 
+export interface RouterLastProfileState {
+  selectedProfile: string;
+  timestamp: number;
+}
+
 export interface RouterPersistedState {
   enabled: boolean;
   selectedProfile: string;

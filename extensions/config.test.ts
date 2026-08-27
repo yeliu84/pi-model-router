@@ -78,6 +78,7 @@ describe('config.ts', () => {
       expect(isThinkingLevel('off')).toBe(true);
       expect(isThinkingLevel('high')).toBe(true);
       expect(isThinkingLevel('xhigh')).toBe(true);
+      expect(isThinkingLevel('max')).toBe(true);
       expect(isThinkingLevel('invalid')).toBe(false);
       expect(isThinkingLevel(123)).toBe(false);
     });

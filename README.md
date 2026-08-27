@@ -14,7 +14,7 @@ Smart per-turn model router extension for the [pi-coding-agent](https://github.c
   - **Fallback Chains**: Automatic retry with alternative models if the primary choice fails.
 - **Phase Memory**: Biased stickiness to keep you in the same tier during multi-turn planning or implementation work.
 - **Thinking Control**: Full control over reasoning/thinking levels per tier and profile. Changing pi's thinking level (e.g. via `shift+tab`) automatically applies as an all-tier override for the active router profile.
-- **Persistent State**: Pins, profiles, costs, and debug history are remembered across agent restarts and conversation branches.
+- **Persistent State**: Pins, costs, and debug history are remembered across agent restarts and conversation branches. When Pi starts on the router provider, new sessions use the last selected router profile if it is still configured. An explicit `--model` selection takes precedence.
 
 ## Installation
 
@@ -46,6 +46,8 @@ Copy the example config to one of:
 
 - `~/.pi/agent/model-router.json` (Global)
 - `.pi/model-router.json` (Project-specific)
+
+The extension stores the last selected profile in `~/.pi/agent/model-router-state.json`. It restores this preference only when Pi starts on the router provider without an explicit `--model` selection. Branch-specific state remains in Pi session entries and takes precedence when a session is resumed.
 
 ### Basic Config Shape
 

@@ -1,8 +1,70 @@
-import { describe, it, expect } from 'vitest';
-import { isRouterPersistedState, buildPersistedState } from './state';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, it, expect } from 'vitest';
+import {
+  isRouterLastProfileState,
+  isRouterPersistedState,
+  buildPersistedState,
+  loadLastRouterProfile,
+  saveLastRouterProfile,
+} from './state';
 import type { RoutingDecision } from './types';
 
 describe('state.ts', () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.length = 0;
+  });
+
+  const createTempDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'pi-model-router-'));
+    tempDirs.push(dir);
+    return dir;
+  };
+
+  describe('last router profile', () => {
+    it('should validate last-profile state', () => {
+      expect(
+        isRouterLastProfileState({
+          selectedProfile: 'balanced',
+          timestamp: Date.now(),
+        }),
+      ).toBe(true);
+      expect(
+        isRouterLastProfileState({ selectedProfile: '', timestamp: 1 }),
+      ).toBe(false);
+      expect(isRouterLastProfileState({ selectedProfile: 'balanced' })).toBe(
+        false,
+      );
+    });
+
+    it('should save and load the last profile', () => {
+      const agentDir = createTempDir();
+
+      expect(saveLastRouterProfile('balanced', agentDir)).toBe(true);
+      expect(loadLastRouterProfile(agentDir)).toBe('balanced');
+    });
+
+    it('should ignore missing or malformed state', () => {
+      const agentDir = createTempDir();
+
+      expect(loadLastRouterProfile(agentDir)).toBeUndefined();
+      writeFileSync(join(agentDir, 'model-router-state.json'), '{bad json');
+      expect(loadLastRouterProfile(agentDir)).toBeUndefined();
+    });
+
+    it('should return false when the state cannot be written', () => {
+      const missingDir = join(createTempDir(), 'missing');
+
+      expect(saveLastRouterProfile('balanced', missingDir)).toBe(false);
+    });
+  });
+
   describe('isRouterPersistedState', () => {
     it('should return false for non-objects or null', () => {
       expect(isRouterPersistedState(null)).toBe(false);

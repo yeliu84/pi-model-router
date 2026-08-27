@@ -42,11 +42,13 @@ The extension is modularized for maintainability:
 
 ## State & Persistence
 
-The router state is persisted using `pi.appendEntry` with a custom type `router-state`. This allows the router to:
+Branch-specific router state is persisted using `pi.appendEntry` with a custom type `router-state`. This allows the router to:
 
 - Restore the active profile and pins across agent relaunches.
 - Maintain independent pins and state for different conversation branches.
 - Track accumulated session costs safely.
+
+The last explicitly selected router profile is also stored in `~/.pi/agent/model-router-state.json`. An explicit startup `--model` selection takes precedence over both cross-session and branch state. Otherwise, a resumed session's branch-specific `router-state` entry wins; a fresh startup or `/new` session uses the cross-session profile when Pi starts on the router provider and that profile is still configured.
 
 ## Reliability: Fallback Chains
 

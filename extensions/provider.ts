@@ -28,7 +28,7 @@ import {
   resolveContextWindow,
   resolveMaxTokens,
   collectProfileThinkingLevels,
-  THINKING_LEVELS,
+  MAX_THINKING_LEVEL,
   clampThinkingLevel,
 } from './config';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
@@ -220,7 +220,7 @@ export const registerRouterProvider = (
     if (hasReasoning) {
       const map: Record<string, string> = {};
       if (profileLevels.has('xhigh')) map.xhigh = 'xhigh';
-      if (profileLevels.has('max')) map.max = 'max';
+      if (profileLevels.has(MAX_THINKING_LEVEL)) map.max = MAX_THINKING_LEVEL;
       if (Object.keys(map).length > 0) thinkingLevelMap = map;
     }
 

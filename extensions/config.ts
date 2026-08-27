@@ -21,6 +21,8 @@ import {
 
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
 
+// Pi accepts this model capability at runtime, but older peer type releases omit it.
+export const MAX_THINKING_LEVEL = 'max' as ThinkingLevel;
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'off',
@@ -29,7 +31,7 @@ export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'medium',
   'high',
   'xhigh',
-  'max',
+  MAX_THINKING_LEVEL,
 ];
 export const ROUTER_PIN_VALUES = ['auto', 'high', 'medium', 'low'] as const;
 

@@ -402,6 +402,24 @@ export const decideRouting = (
   return decision;
 };
 
+const AUTH_HEADER_NAMES = new Set([
+  'authorization',
+  'x-api-key',
+  'cf-aig-authorization',
+]);
+
+export const hasAuthHeader = (
+  headers: Record<string, string | null> | undefined,
+): boolean => {
+  if (!headers) return false;
+  return Object.entries(headers).some(
+    ([key, value]) =>
+      AUTH_HEADER_NAMES.has(key.toLowerCase()) &&
+      typeof value === 'string' &&
+      value.length > 0,
+  );
+};
+
 export const runClassifier = async (
   classifierModelRef: string,
   modelRegistry: RouterModelRegistry,
@@ -415,7 +433,9 @@ export const runClassifier = async (
     if (!model) return undefined;
 
     const auth = await modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok || !auth.apiKey) return undefined;
+    if (!auth.ok || (!auth.apiKey && !hasAuthHeader(auth.headers))) {
+      return undefined;
+    }
     const apiKey = auth.apiKey;
     const headers = auth.headers;
 

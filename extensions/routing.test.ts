@@ -633,5 +633,33 @@ describe('routing.ts', () => {
       );
       expect(result).toBeUndefined();
     });
+
+    it('should accept headers-only authentication in runClassifier', async () => {
+      const headersOnlyRegistry: RouterModelRegistry = {
+        find: (provider: string, modelId: string) =>
+          createClassifierModel(provider, modelId),
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: undefined,
+          headers: { Authorization: 'Bearer kimi-oauth-token' },
+        }),
+      };
+
+      const mockStream = createTextDeltaStream(
+        'Tier: low\n',
+        'Reasoning: Short lookup.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
+
+      const result = await runClassifier(
+        'kimi-coding/k3',
+        headersOnlyRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'Short lookup.',
+      });
+    });
   });
 });

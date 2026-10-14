@@ -686,6 +686,58 @@ describe('provider.ts', () => {
       expect(result.errorMessage).toContain('model unavailable');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
+
+    it('should accept headers-only authentication without apiKey (e.g. kimi-coding OAuth)', async () => {
+      mockState.currentConfig.profiles.balanced.high = {
+        model: 'kimi-coding/k3',
+      };
+      mockState.pinnedTierByProfile['balanced'] = 'high';
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) => {
+        if (provider === 'kimi-coding' && modelId === 'k3') {
+          return createTestModel({
+            provider,
+            id: modelId,
+            api: 'anthropic-messages',
+          });
+        }
+        return undefined;
+      };
+      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
+        ok: true,
+        apiKey: undefined,
+        headers: { Authorization: 'Bearer kimi-oauth-token' },
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      vi.mocked(streamSimple).mockReturnValue(
+        createDelegateStream('kimi answer', 0.002),
+      );
+
+      const model = createTestModel({
+        id: 'balanced',
+        provider: 'router',
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
+
+      const stream = registeredProviderOptions!.streamSimple!(model, context);
+      const result = await stream.result();
+
+      expect(result.stopReason).toBe('stop');
+      expect(vi.mocked(streamSimple)).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'kimi-coding', id: 'k3' }),
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: undefined,
+          headers: { Authorization: 'Bearer kimi-oauth-token' },
+        }),
+      );
+    });
   });
 
   describe('waitForRegistry', () => {

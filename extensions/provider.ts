@@ -40,6 +40,7 @@ import {
   runClassifier,
   extractMessageText,
   hasImageAttachment,
+  hasAuthHeader,
 } from './routing';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 const REGISTRY_WAIT_TIMEOUT_MS = 5000;
@@ -455,7 +456,7 @@ export const registerRouterProvider = <
             }
 
             const auth = await registry.getApiKeyAndHeaders(targetModel);
-            if (!auth.ok || !auth.apiKey) {
+            if (!auth.ok || (!auth.apiKey && !hasAuthHeader(auth.headers))) {
               lastError = new Error(
                 auth.ok
                   ? `No API key for routed model: ${targetProvider}/${targetModelId}`

@@ -415,9 +415,15 @@ export const runClassifier = async (
     if (!model) return undefined;
 
     const auth = await modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok || !auth.apiKey) return undefined;
+    if (!auth.ok) return undefined;
     const apiKey = auth.apiKey;
-    const headers = auth.headers;
+    const headers =
+      model.headers || auth.headers
+        ? { ...model.headers, ...auth.headers }
+        : undefined;
+    if (!apiKey && (!headers || Object.keys(headers).length === 0)) {
+      return undefined;
+    }
 
     const promptText = getLastUserText(context);
     const historyText = getRecentConversationText(context, 4);

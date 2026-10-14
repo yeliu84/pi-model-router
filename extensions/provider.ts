@@ -455,16 +455,26 @@ export const registerRouterProvider = <
             }
 
             const auth = await registry.getApiKeyAndHeaders(targetModel);
-            if (!auth.ok || !auth.apiKey) {
+            if (!auth.ok) {
               lastError = new Error(
-                auth.ok
-                  ? `No API key for routed model: ${targetProvider}/${targetModelId}`
-                  : `Auth failed for routed model: ${targetProvider}/${targetModelId}: ${auth.error}`,
+                `Auth failed for routed model: ${targetProvider}/${targetModelId}: ${auth.error}`,
+              );
+              continue;
+            }
+            const headers =
+              targetModel.headers || auth.headers
+                ? { ...targetModel.headers, ...auth.headers }
+                : undefined;
+            if (
+              !auth.apiKey &&
+              (!headers || Object.keys(headers).length === 0)
+            ) {
+              lastError = new Error(
+                `No API key for routed model: ${targetProvider}/${targetModelId}`,
               );
               continue;
             }
             const apiKey = auth.apiKey;
-            const headers = auth.headers;
 
             try {
               // HONESTY CHECK & AUTO-TRUNCATION

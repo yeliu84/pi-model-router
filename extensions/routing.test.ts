@@ -633,5 +633,56 @@ describe('routing.ts', () => {
       );
       expect(result).toBeUndefined();
     });
+
+    it('should merge model.headers with auth.headers and run classifier without apiKey', async () => {
+      const mockStream = createTextDeltaStream(
+        'Tier: low\n',
+        'Reasoning: Simple greeting.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
+
+      const customHeadersRegistry: RouterModelRegistry = {
+        find: (provider: string, modelId: string) => {
+          if (provider === 'openai' && modelId === 'gpt-4o') {
+            return {
+              ...createClassifierModel(provider, modelId),
+              headers: {
+                'cf-aig-authorization': 'Bearer cf-token',
+                'x-custom': 'from-model',
+              },
+            };
+          }
+          return undefined;
+        },
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: undefined,
+          headers: {
+            'x-custom': 'from-auth',
+          },
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        customHeadersRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'Simple greeting.',
+      });
+      expect(streamSimple).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'gpt-4o' }),
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: undefined,
+          headers: {
+            'cf-aig-authorization': 'Bearer cf-token',
+            'x-custom': 'from-auth',
+          },
+        }),
+      );
+    });
   });
 });

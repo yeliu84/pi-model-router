@@ -686,6 +686,64 @@ describe('provider.ts', () => {
       expect(result.errorMessage).toContain('model unavailable');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
+
+    it('should merge targetModel.headers from models.json with auth.headers and allow delegation without apiKey', async () => {
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) =>
+        createTestModel({
+          provider,
+          id: modelId,
+          headers: {
+            'cf-aig-authorization': 'Bearer cf-token',
+            'x-custom': 'from-model',
+          },
+        });
+      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
+        ok: true,
+        apiKey: undefined,
+        headers: {
+          'x-custom': 'from-auth',
+          'x-extra': 'extra-val',
+        },
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      vi.mocked(streamSimple).mockReturnValue(
+        createDelegateStream('custom headers response', 0.001),
+      );
+
+      const model = createTestModel({
+        id: 'balanced',
+        provider: 'router',
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
+
+      registeredProviderOptions!.streamSimple!(model, context);
+
+      await vi.waitFor(
+        () => {
+          expect(streamSimple).toHaveBeenCalledWith(
+            expect.objectContaining({ id: 'gpt-4o-mini' }),
+            expect.anything(),
+            expect.objectContaining({
+              apiKey: undefined,
+              headers: {
+                'cf-aig-authorization': 'Bearer cf-token',
+                'x-custom': 'from-auth',
+                'x-extra': 'extra-val',
+              },
+            }),
+          );
+          expect(mockState.accumulatedCost).toBe(0.001);
+        },
+        { timeout: 1000 },
+      );
+    });
   });
 
   describe('waitForRegistry', () => {

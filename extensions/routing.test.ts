@@ -633,5 +633,36 @@ describe('routing.ts', () => {
       );
       expect(result).toBeUndefined();
     });
+
+    it('should use custom registered provider streamSimple when available', async () => {
+      vi.mocked(streamSimple).mockClear();
+      const customStreamFn = vi
+        .fn()
+        .mockReturnValue(
+          createTextDeltaStream(
+            'Tier: medium\n',
+            'Reasoning: Custom provider classifier.',
+          ),
+        );
+      const customProviderRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        getRegisteredProviderConfig: vi.fn().mockReturnValue({
+          api: 'openai-completions',
+          streamSimple: customStreamFn,
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        customProviderRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'medium',
+        reasoning: 'Custom provider classifier.',
+      });
+      expect(customStreamFn).toHaveBeenCalled();
+      expect(streamSimple).not.toHaveBeenCalled();
+    });
   });
 });

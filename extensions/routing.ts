@@ -1,8 +1,10 @@
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import {
   normalizeContext,
+  type Api,
   type Context,
   type Message,
+  type Model,
   type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
@@ -14,6 +16,7 @@ import type {
   RoutingRule,
   RouterThinkingByTier,
   RouterModelRegistry,
+  ResolvedModelRequest,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier } from './config';
 
@@ -407,22 +410,59 @@ export const decideRouting = (
   return decision;
 };
 
-const AUTH_HEADER_NAMES = new Set([
-  'authorization',
-  'x-api-key',
-  'cf-aig-authorization',
-]);
-
-export const hasAuthHeader = (
+const hasNonEmptyHeaders = (
   headers: Record<string, string | null> | undefined,
-): boolean => {
-  if (!headers) return false;
-  return Object.entries(headers).some(
-    ([key, value]) =>
-      AUTH_HEADER_NAMES.has(key.toLowerCase()) &&
-      typeof value === 'string' &&
-      value.length > 0,
-  );
+): boolean =>
+  headers !== undefined &&
+  Object.values(headers).some((v) => typeof v === 'string' && v.length > 0);
+
+export const resolveModelRequestAuth = async (
+  model: Model<Api>,
+  registry: RouterModelRegistry,
+): Promise<ResolvedModelRequest> => {
+  const auth = await registry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
+    return {
+      ok: false,
+      error: `Auth failed for routed model: ${model.provider}/${model.id}: ${auth.error}`,
+    };
+  }
+  const headers =
+    model.headers || auth.headers
+      ? { ...model.headers, ...auth.headers }
+      : undefined;
+  if (!auth.apiKey && !hasNonEmptyHeaders(headers)) {
+    return {
+      ok: false,
+      error: `No API key for routed model: ${model.provider}/${model.id}`,
+    };
+  }
+  return {
+    ok: true,
+    model: auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
+    streamOptions: {
+      apiKey: auth.apiKey,
+      headers,
+      ...(auth.env ? { env: auth.env } : {}),
+    },
+  };
+};
+
+export const streamWithModel = (
+  model: Model<Api>,
+  context: Context,
+  registry: RouterModelRegistry,
+  options: SimpleStreamOptions,
+) => {
+  const providerConfig = registry.getRegisteredProviderConfig?.(model.provider);
+  const customStreamSimple =
+    providerConfig?.streamSimple &&
+    (!providerConfig.api || providerConfig.api === model.api)
+      ? providerConfig.streamSimple
+      : undefined;
+  return customStreamSimple
+    ? customStreamSimple(model, normalizeContext(context), options)
+    : streamSimple(model, context, options);
 };
 
 export const runClassifier = async (
@@ -437,20 +477,8 @@ export const runClassifier = async (
     const model = modelRegistry.find(provider, modelId);
     if (!model) return undefined;
 
-    const auth = await modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) return undefined;
-    const apiKey = auth.apiKey;
-    const headers =
-      model.headers || auth.headers
-        ? { ...model.headers, ...auth.headers }
-        : undefined;
-    if (
-      !apiKey &&
-      !hasAuthHeader(headers) &&
-      (!headers || Object.keys(headers).length === 0)
-    ) {
-      return undefined;
-    }
+    const resolved = await resolveModelRequestAuth(model, modelRegistry);
+    if (!resolved.ok) return undefined;
 
     const promptText = getLastUserText(context);
     const historyText = getRecentConversationText(context, 4);
@@ -485,32 +513,15 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
     const reasoningOption =
       model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
 
-    const effectiveModel = auth.baseUrl
-      ? { ...model, baseUrl: auth.baseUrl }
-      : model;
-
-    const providerConfig = modelRegistry.getRegisteredProviderConfig?.(
-      effectiveModel.provider,
+    const stream = streamWithModel(
+      resolved.model,
+      classifierContext,
+      modelRegistry,
+      {
+        ...resolved.streamOptions,
+        ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+      },
     );
-    const customStreamSimple =
-      providerConfig?.streamSimple &&
-      (!providerConfig.api || providerConfig.api === effectiveModel.api)
-        ? providerConfig.streamSimple
-        : undefined;
-    const streamOptions: SimpleStreamOptions = {
-      apiKey,
-      headers,
-      ...(auth.env ? { env: auth.env } : {}),
-      ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-    };
-
-    const stream = customStreamSimple
-      ? customStreamSimple(
-          effectiveModel,
-          normalizeContext(classifierContext),
-          streamOptions,
-        )
-      : streamSimple(effectiveModel, classifierContext, streamOptions);
     let fullText = '';
     for await (const event of stream) {
       if (event.type === 'text_delta') {

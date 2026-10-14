@@ -1,5 +1,6 @@
 import {
   createAssistantMessageEventStream,
+  normalizeContext,
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
@@ -456,16 +457,27 @@ export const registerRouterProvider = <
             }
 
             const auth = await registry.getApiKeyAndHeaders(targetModel);
-            if (!auth.ok || (!auth.apiKey && !hasAuthHeader(auth.headers))) {
+            if (!auth.ok) {
               lastError = new Error(
-                auth.ok
-                  ? `No API key for routed model: ${targetProvider}/${targetModelId}`
-                  : `Auth failed for routed model: ${targetProvider}/${targetModelId}: ${auth.error}`,
+                `Auth failed for routed model: ${targetProvider}/${targetModelId}: ${auth.error}`,
+              );
+              continue;
+            }
+            const headers =
+              targetModel.headers || auth.headers
+                ? { ...targetModel.headers, ...auth.headers }
+                : undefined;
+            if (
+              !auth.apiKey &&
+              !hasAuthHeader(headers) &&
+              (!headers || Object.keys(headers).length === 0)
+            ) {
+              lastError = new Error(
+                `No API key for routed model: ${targetProvider}/${targetModelId}`,
               );
               continue;
             }
             const apiKey = auth.apiKey;
-            const headers = auth.headers;
 
             try {
               // HONESTY CHECK & AUTO-TRUNCATION
@@ -516,19 +528,37 @@ export const registerRouterProvider = <
                 ? { ...targetModel, baseUrl: auth.baseUrl }
                 : targetModel;
 
-              const delegatedStream = streamSimple(
-                effectiveTargetModel,
-                effectiveContext,
-                {
-                  ...delegationOptions,
-                  apiKey,
-                  headers,
-                  ...(auth.env ? { env: auth.env } : {}),
-                  ...(delegatedReasoning
-                    ? { reasoning: delegatedReasoning }
-                    : {}),
-                },
+              const providerConfig = registry.getRegisteredProviderConfig?.(
+                effectiveTargetModel.provider,
               );
+              const customStreamSimple =
+                providerConfig?.streamSimple &&
+                (!providerConfig.api ||
+                  providerConfig.api === effectiveTargetModel.api)
+                  ? providerConfig.streamSimple
+                  : undefined;
+
+              const streamOptions: SimpleStreamOptions = {
+                ...delegationOptions,
+                apiKey,
+                headers,
+                ...(auth.env ? { env: auth.env } : {}),
+                ...(delegatedReasoning
+                  ? { reasoning: delegatedReasoning }
+                  : {}),
+              };
+
+              const delegatedStream = customStreamSimple
+                ? customStreamSimple(
+                    effectiveTargetModel,
+                    normalizeContext(effectiveContext),
+                    streamOptions,
+                  )
+                : streamSimple(
+                    effectiveTargetModel,
+                    effectiveContext,
+                    streamOptions,
+                  );
 
               let contentReceived = false;
               for await (const event of delegatedStream) {

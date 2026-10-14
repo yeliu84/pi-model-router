@@ -375,6 +375,91 @@ describe('index.ts (orchestrator)', () => {
 
       expect(mockPi.appendEntry).not.toHaveBeenCalled();
     });
+
+    it('should ignore thinking_level_select emitted by pi.setModel during session_start (defaultThinkingLevel in settings.json)', async () => {
+      const mockCtx = buildMockCtx();
+
+      // Simulate Pi >= 0.85.0 behavior where pi.setModel emits thinking_level_select
+      // with defaultThinkingLevel from settings.json
+      mockPi.setModel = vi.fn(async () => {
+        const thinkingHandlers = eventListeners['thinking_level_select'] || [];
+        for (const handler of thinkingHandlers) {
+          await handler({ level: 'medium' }, mockCtx);
+        }
+        return true;
+      });
+
+      routerExtension(mockPi);
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          enabled: true,
+          selectedProfile: 'balanced',
+          thinkingByProfile: {},
+        }),
+      );
+    });
+
+    it('should ignore thinking_level_select emitted during internal model switches (e.g. turn_end)', async () => {
+      const mockCtx = buildMockCtx();
+
+      routerExtension(mockPi);
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      mockPi.appendEntry.mockClear();
+
+      // Simulate pi.setModel emitting thinking_level_select during turn_end restoration
+      mockPi.setModel = vi.fn(async () => {
+        mockCtx.model = { provider: 'router', id: 'balanced' };
+        const thinkingHandlers = eventListeners['thinking_level_select'] || [];
+        for (const handler of thinkingHandlers) {
+          await handler({ level: 'medium' }, mockCtx);
+        }
+        return true;
+      });
+
+      mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
+      const turnEndHandlers = eventListeners['turn_end'] || [];
+      for (const handler of turnEndHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // State did not change because thinking_level_select was ignored, so appendEntry should not be called
+      expect(mockPi.appendEntry).not.toHaveBeenCalled();
+    });
+
+    it('should ignore thinking_level_select when ctx.model does not match the active router profile', async () => {
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      mockPi.appendEntry.mockClear();
+
+      // Simulate external model switch where Pi updates ctx.model and emits
+      // thinking_level_select before emitting model_select
+      mockCtx.model = { provider: 'anthropic', id: 'claude-3-5-sonnet' };
+      const thinkingHandlers = eventListeners['thinking_level_select'] || [];
+      for (const handler of thinkingHandlers) {
+        await handler({ level: 'medium' }, mockCtx);
+      }
+
+      expect(mockPi.appendEntry).not.toHaveBeenCalled();
+    });
   });
 
   describe('restoreStateFromSession edge cases', () => {

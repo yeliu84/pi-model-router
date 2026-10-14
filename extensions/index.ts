@@ -420,8 +420,9 @@ const routerExtension = <
   );
 
   pi.on('session_start', async (_event, ctx) => {
-    isInitialized = true;
+    isInitialized = false;
     await restoreStateFromSession(ctx);
+    isInitialized = true;
     if (debugEnabled) {
       ctx.ui.notify(
         `Router initialized with profiles: ${profileNames(currentConfig).join(', ')}`,
@@ -499,7 +500,10 @@ const routerExtension = <
   pi.on('thinking_level_select', (event, ctx) => {
     ensureInitializedFromContext(ctx);
     if (!isInitialized || !routerEnabled || !selectedProfile) return;
-    if (isInternalThinkingChange) return;
+    if (isInternalThinkingChange || isInternalModelSwitch) return;
+    if (ctx.model?.provider !== 'router' || ctx.model?.id !== selectedProfile) {
+      return;
+    }
 
     // User changed pi's thinking level (e.g. via shift+tab).
     // Apply as an all-tier thinking override for the active router profile.

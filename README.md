@@ -74,6 +74,50 @@ Copy the example config to one of:
 | `models`           | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`.                                                                       |
 | `profiles`         | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`. |
 
+### Local & Custom Models (`llama.cpp`, Ollama, LM Studio)
+
+#### 1. Using Pi's built-in `/llama` integration
+
+If you connect a running `llama-server` instance in Pi via `/llama`, Pi registers its models under the `llama.cpp` provider. Reference them in `model-router.json` as `"llama.cpp/<model-id>"` (model IDs containing slashes, such as HuggingFace repo names, are supported):
+
+```json
+{
+  "profiles": {
+    "local": {
+      "high": { "model": "anthropic/claude-opus-4-6" },
+      "medium": { "model": "llama.cpp/Qwen3.5-27B-Q4_K_M.gguf" },
+      "low": { "model": "llama.cpp/Qwen/Qwen3-Coder-Next-GGUF" }
+    }
+  }
+}
+```
+
+#### 2. Defining local servers in `~/.pi/agent/models.json`
+
+If you configure a custom OpenAI-compatible local provider in `~/.pi/agent/models.json` (e.g., `llama-server`, Ollama, or LM Studio), include a non-empty placeholder `"apiKey"` (such as `"local"`) in the provider entry so Pi's model registry resolves authentication for routed requests:
+
+```json
+{
+  "providers": {
+    "llama-local": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "models": [
+        {
+          "id": "qwen3-coder",
+          "name": "Qwen3 Coder (Local)",
+          "contextWindow": 65536,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}
+```
+
+Then reference `"llama-local/qwen3-coder"` in your `model-router.json` tiers or `models` aliases.
+
 ## Commands
 
 | Command                           | Description                                                                                                       |

@@ -660,5 +660,57 @@ describe('index.ts (orchestrator)', () => {
       await turnStartHandlers[0]({}, mockCtx2);
       expect(mockCtx2.ui.setStatus).not.toHaveBeenCalled();
     });
+
+    it('should refresh router provider registration on turn_start when dynamic models (e.g. llama.cpp) are added after session_start', async () => {
+      let dynamicModelLoaded = false;
+      routerExtension(mockPi);
+
+      const mockCtx = buildMockCtx();
+      mockCtx.modelRegistry.find = vi.fn(
+        (provider: string, modelId: string) => {
+          if (provider === 'openai' && modelId === 'gpt-4o') {
+            return dynamicModelLoaded
+              ? createTestModel({
+                  provider,
+                  id: modelId,
+                  reasoning: true,
+                })
+              : undefined;
+          }
+          return createTestModel({
+            provider,
+            id: modelId,
+            reasoning: false,
+          });
+        },
+      );
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      mockPi.registerProvider.mockClear();
+
+      // Simulate dynamic model registration (e.g. via /llama command after session_start)
+      dynamicModelLoaded = true;
+
+      const turnStartHandlers = eventListeners['turn_start'] || [];
+      for (const handler of turnStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      expect(mockPi.registerProvider).toHaveBeenCalledWith(
+        'router',
+        expect.objectContaining({
+          models: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'balanced',
+              reasoning: true,
+            }),
+          ]),
+        }),
+      );
+    });
   });
 });

@@ -64,9 +64,7 @@ const buildMockCtx = () => ({
   cwd: '/mock/cwd',
   modelRegistry: {
     find: vi
-      .fn<
-        (provider: string, modelId: string) => Model<Api> | undefined
-      >()
+      .fn<(provider: string, modelId: string) => Model<Api> | undefined>()
       .mockReturnValue(createTestModel({ provider: 'router', id: 'balanced' })),
     getApiKeyAndHeaders: async () => ({
       ok: true as const,
@@ -106,9 +104,7 @@ type TriggerHandler = (
   ctx: MockCtx,
 ) => Promise<void> | void;
 
-const createMockPi = (
-  eventListeners: Record<string, TriggerHandler[]>,
-) => ({
+const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
   registerProvider: vi.fn(() => {}),
   registerCommand: vi.fn(() => {}),
   setModel: vi.fn(async () => true),
@@ -613,7 +609,10 @@ describe('index.ts (orchestrator)', () => {
       // Select router model to ensure routerEnabled=true
       const modelSelectHandlers = eventListeners['model_select'] || [];
       for (const handler of modelSelectHandlers) {
-        await handler({ model: { provider: 'router', id: 'balanced' } }, mockCtx);
+        await handler(
+          { model: { provider: 'router', id: 'balanced' } },
+          mockCtx,
+        );
       }
 
       // Clear mocks after initialization and model_select

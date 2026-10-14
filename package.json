@@ -40,7 +40,9 @@
     "tsc": "tsc --noEmit",
     "build": "tsc",
     "prepublishOnly": "npm run tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -49,7 +51,7 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "prettier": "^3.9.10",
+    "oxfmt": "^0.73.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"
   }

@@ -1,9 +1,11 @@
 # Pi Model Router: Core Mandates
 
 ## Project Overview
+
 The `pi-model-router` is an extension-first model router for the `pi` coding agent. It registers a custom logical provider (`router`) that exposes "profiles" as models (e.g., `router/auto`). For every turn, the router intelligently selects an underlying concrete model based on task complexity, conversation phase, and user-defined rules.
 
 ## Architectural Principles
+
 - **Extension-First**: All functionality must be implemented as a `pi` extension without modifying `pi` core.
 - **Custom Provider**: Use `pi.registerProvider` to hook into the model lifecycle. The logical model (e.g., `router/auto`) should remain stable while the underlying model changes transparently.
 - **Modularized Design**: Strictly follow the modular structure defined in Phase 3:
@@ -17,7 +19,9 @@ The `pi-model-router` is an extension-first model router for the `pi` coding age
   - `extensions/index.ts`: Main entry point (orchestrator).
 
 ## Routing Decision Logic
+
 Routing follows a tiered system (`high`, `medium`, `low`) and an ordered decision flow:
+
 1. **Budget Check**: Downgrade to `medium` if `maxSessionBudget` is exceeded.
 2. **Manual Pin**: Use tier pinned via `/router pin` or `/router fix`.
 3. **Custom Rules**: Check keyword-based rules against the user prompt.
@@ -26,6 +30,7 @@ Routing follows a tiered system (`high`, `medium`, `low`) and an ordered decisio
 6. **Phase Bias**: Apply stickiness to maintain a consistent tier during multi-turn tasks.
 
 ## Coding Standards
+
 - **TypeScript**: Strictly adhere to TypeScript. NEVER use the `any` type; prefer specific types or `unknown`.
 - **Functions**: Always use arrow functions (`const myFunc = () => ...`) instead of function statements (`function myFunc() ...`) for consistency and lexical scoping.
 - **Imports**: Use top-level static imports over inline `import()` or `require()` calls for consistency and cleaner ESM code.
@@ -33,6 +38,7 @@ Routing follows a tiered system (`high`, `medium`, `low`) and an ordered decisio
 - **Error Handling**: Implement robust fallback chains for model failures (retrying with alternative models).
 
 ## Documentation Reference
+
 - `docs/ARCHITECTURE.md`: Detailed architectural deep dive.
 - `README.md`: Usage and installation guide.
 - `model-router.example.json`: Reference for configuration structure.

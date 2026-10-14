@@ -60,10 +60,7 @@ export const registerCommands = <
   actions: {
     persistState: () => void;
     updateStatus: (ctx: TCtx) => void;
-    reloadConfig: (
-      ctx?: TCtx,
-      options?: { preserveDebug?: boolean },
-    ) => void;
+    reloadConfig: (ctx?: TCtx, options?: { preserveDebug?: boolean }) => void;
     ensureValidActiveRouterProfile: (ctx: TCtx) => Promise<void>;
     switchToRouterProfile: (
       profileName: string,
@@ -111,9 +108,10 @@ export const registerCommands = <
       ).map((value) => ({
         value,
         label: value,
-        description: value === 'auto'
-          ? 'Restore auto-routing (clear pin) for the active profile'
-          : `Pin active profile to ${value} tier`,
+        description:
+          value === 'auto'
+            ? 'Restore auto-routing (clear pin) for the active profile'
+            : `Pin active profile to ${value} tier`,
       }));
       return items.length > 0 ? items : null;
     }
@@ -135,9 +133,10 @@ export const registerCommands = <
           .map((v) => ({
             value: v,
             label: v,
-            description: v === 'auto'
-              ? 'Restore default thinking level'
-              : `Set thinking level to ${v}`,
+            description:
+              v === 'auto'
+                ? 'Restore default thinking level'
+                : `Set thinking level to ${v}`,
           })),
         ...tierValues
           .filter((v) => v.startsWith(token))
@@ -161,15 +160,15 @@ export const registerCommands = <
         .map((v) => ({
           value: `${tier} ${v}`,
           label: `${tier} ${v}`,
-          description: v === 'auto'
-            ? `Restore default thinking level for ${tier} tier`
-            : `Set thinking level to ${v} for ${tier} tier`,
+          description:
+            v === 'auto'
+              ? `Restore default thinking level for ${tier} tier`
+              : `Set thinking level to ${v} for ${tier} tier`,
         }));
     }
 
     return null;
   };
-
 
   const handleStatus = async (args: string[], ctx: TCtx) => {
     if (args.length > 0) {
@@ -239,7 +238,10 @@ export const registerCommands = <
   const handlePin = async (args: string[], ctx: TCtx) => {
     const currentProfile = state.selectedProfile;
     if (!currentProfile) {
-      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      ctx.ui.notify(
+        'No router profile is active. Select a router model first.',
+        'error',
+      );
       return;
     }
     if (args.length === 0) {
@@ -256,16 +258,17 @@ export const registerCommands = <
     }
 
     if (args.length > 1) {
-      ctx.ui.notify(
-        'Usage: /router pin <high|medium|low|auto>',
-        'error',
-      );
+      ctx.ui.notify('Usage: /router pin <high|medium|low|auto>', 'error');
       return;
     }
 
     const pinValue = args[0];
 
-    if (!ROUTER_PIN_VALUES.includes(pinValue as (typeof ROUTER_PIN_VALUES)[number])) {
+    if (
+      !ROUTER_PIN_VALUES.includes(
+        pinValue as (typeof ROUTER_PIN_VALUES)[number],
+      )
+    ) {
       ctx.ui.notify(
         `Invalid router pin: ${pinValue}. Use one of: ${ROUTER_PIN_VALUES.join(', ')}`,
         'error',
@@ -292,7 +295,10 @@ export const registerCommands = <
   const handleThinking = async (args: string[], ctx: TCtx) => {
     const currentProfile = state.selectedProfile;
     if (!currentProfile) {
-      ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
+      ctx.ui.notify(
+        'No router profile is active. Select a router model first.',
+        'error',
+      );
       return;
     }
     if (args.length === 0) {
@@ -364,7 +370,8 @@ export const registerCommands = <
       if (!state.thinkingByProfile[currentProfile])
         state.thinkingByProfile[currentProfile] = {};
       if (nextLevel)
-        state.thinkingByProfile[currentProfile]![tier as RouterTier] = nextLevel;
+        state.thinkingByProfile[currentProfile]![tier as RouterTier] =
+          nextLevel;
       else delete state.thinkingByProfile[currentProfile]![tier as RouterTier];
     }
     if (

@@ -18,10 +18,7 @@ interface RegisteredRouterCommand {
   handler: (args: string, ctx: RouterCommandContext) => Promise<void>;
 }
 
-const createTestModel = (
-  provider: string,
-  id: string,
-): Model<Api> => ({
+const createTestModel = (provider: string, id: string): Model<Api> => ({
   id,
   name: id,
   api: 'openai-completions',
@@ -52,7 +49,9 @@ describe('commands.ts', () => {
         }
         return {
           ...registeredCommand,
-          getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+          getArgumentCompletions: (
+            prefix: string,
+          ): AutocompleteItem[] | null => {
             const res = registeredCommand!.getArgumentCompletions!(prefix);
             return res instanceof Promise ? null : res;
           },

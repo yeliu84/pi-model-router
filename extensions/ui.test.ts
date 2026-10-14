@@ -74,7 +74,8 @@ describe('ui.ts', () => {
     const buildMockCtx = () => ({
       ui: {
         setStatus: vi.fn<(key: string, text: string | undefined) => void>(),
-        setWidget: vi.fn<(key: string, content: string[] | undefined) => void>(),
+        setWidget:
+          vi.fn<(key: string, content: string[] | undefined) => void>(),
         theme: mockTheme,
       },
     });

@@ -137,10 +137,7 @@ const routerExtension = <
         widgetEnabled,
         currentConfig,
       ),
-    reloadConfig: (
-      ctx?: TCtx,
-      options?: { preserveDebug?: boolean },
-    ) => {
+    reloadConfig: (ctx?: TCtx, options?: { preserveDebug?: boolean }) => {
       const loaded = loadRouterConfig(currentCwd);
       currentConfig = loaded.config;
       lastConfigWarnings = loaded.warnings;
@@ -281,9 +278,10 @@ const routerExtension = <
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     routerEnabled = ctx.model?.provider === 'router';
-    selectedProfile = ctx.model?.provider === 'router'
-      ? resolveProfileName(currentConfig, ctx.model.id)
-      : resolveProfileName(currentConfig, selectedProfile);
+    selectedProfile =
+      ctx.model?.provider === 'router'
+        ? resolveProfileName(currentConfig, ctx.model.id)
+        : resolveProfileName(currentConfig, selectedProfile);
     // Clear in-place to keep references intact
     for (const key of Object.keys(pinnedTierByProfile)) {
       delete pinnedTierByProfile[key];

@@ -58,10 +58,7 @@ const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
   ...overrides,
 });
 
-const createAssistantMsg = (
-  text: string,
-  totalCost = 0,
-): AssistantMessage => ({
+const createAssistantMsg = (text: string, totalCost = 0): AssistantMessage => ({
   role: 'assistant',
   content: [{ type: 'text', text }],
   api: 'openai-completions',
@@ -490,8 +487,12 @@ describe('provider.ts', () => {
       expect(truncatedContextPassed).toBeDefined();
       expect(truncatedContextPassed!.messages[0].role).toBe('system');
       expect(truncatedContextPassed!.messages.length).toBe(3);
-      expect(truncatedContextPassed!.messages[1].content).toBe('b'.repeat(8000));
-      expect(truncatedContextPassed!.messages[2].content).toBe('c'.repeat(2000));
+      expect(truncatedContextPassed!.messages[1].content).toBe(
+        'b'.repeat(8000),
+      );
+      expect(truncatedContextPassed!.messages[2].content).toBe(
+        'c'.repeat(2000),
+      );
     });
 
     it('should push error event when currentModelRegistry never becomes available', async () => {

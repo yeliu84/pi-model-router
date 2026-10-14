@@ -122,7 +122,9 @@ export const buildRoutingDecision = (
 ): RoutingDecision => {
   const routed = profile[tier];
   if (!routed) {
-    throw new Error(`Profile "${profileName}" has no configuration for the ${tier} tier.`);
+    throw new Error(
+      `Profile "${profileName}" has no configuration for the ${tier} tier.`,
+    );
   }
   const { provider, modelId } = parseCanonicalModelRef(routed.model);
   const baseThinking =
@@ -442,13 +444,13 @@ ${currentPhase === 'planning' ? 'Consider that the conversation is currently in 
 ${currentPhase === 'implementation' ? 'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.' : ''}`;
 
     const classifierContext: Context = {
-      messages: [{ role: 'user', content: classifierPrompt, timestamp: Date.now() }],
+      messages: [
+        { role: 'user', content: classifierPrompt, timestamp: Date.now() },
+      ],
     };
 
     const reasoningOption =
-      model.reasoning && thinking && thinking !== 'off'
-        ? thinking
-        : undefined;
+      model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
 
     const effectiveModel = auth.baseUrl
       ? { ...model, baseUrl: auth.baseUrl }

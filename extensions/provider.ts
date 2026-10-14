@@ -210,11 +210,7 @@ export const registerRouterProvider = <
         profile,
         state.currentModelRegistry,
       );
-      const mot = resolveMaxTokens(
-        tier,
-        profile,
-        state.currentModelRegistry,
-      );
+      const mot = resolveMaxTokens(tier, profile, state.currentModelRegistry);
       if (cw > maxContextWindow) maxContextWindow = cw;
       if (mot > maxMaxTokens) maxMaxTokens = mot;
     }
@@ -268,7 +264,10 @@ export const registerRouterProvider = <
           // Wait for the router to be fully initialized (session_start sets currentModelRegistry).
           // This handles the race where subagents (e.g. from pi-dynamic-workflows) invoke
           // the router provider before session_start has fired in their context.
-          const registry = await waitForRegistry(state, state.registryTimeoutMs);
+          const registry = await waitForRegistry(
+            state,
+            state.registryTimeoutMs,
+          );
           if (!registry) {
             throw new Error(
               'Router provider initialization timed out. session_start may not have fired.',
@@ -425,10 +424,12 @@ export const registerRouterProvider = <
             // Stale extension context — skip non-critical UI updates.
           }
 
-          let modelsToTry = [...new Set([
-            decision.targetLabel,
-            ...(profile[decision.tier]?.fallbacks ?? []),
-          ])];
+          let modelsToTry = [
+            ...new Set([
+              decision.targetLabel,
+              ...(profile[decision.tier]?.fallbacks ?? []),
+            ]),
+          ];
           if (imageAttached) {
             modelsToTry = modelsToTry.filter(checkModelSupportsImage);
             if (modelsToTry.length === 0) {
@@ -445,10 +446,7 @@ export const registerRouterProvider = <
 
             if (targetProvider === 'router') continue;
 
-            const targetModel = registry.find(
-              targetProvider,
-              targetModelId,
-            );
+            const targetModel = registry.find(targetProvider, targetModelId);
             if (!targetModel) {
               lastError = new Error(
                 `Routed model not found: ${targetProvider}/${targetModelId}`,
@@ -456,8 +454,7 @@ export const registerRouterProvider = <
               continue;
             }
 
-            const auth =
-              await registry.getApiKeyAndHeaders(targetModel);
+            const auth = await registry.getApiKeyAndHeaders(targetModel);
             if (!auth.ok || !auth.apiKey) {
               lastError = new Error(
                 auth.ok
@@ -568,15 +565,13 @@ export const registerRouterProvider = <
           }
 
           if (!success) {
-            throw (
-              lastError instanceof Error
-                ? lastError
-                : new Error(
-                    typeof lastError === 'string'
-                      ? lastError
-                      : 'Failed to delegate to any model in the chain.',
-                  )
-            );
+            throw lastError instanceof Error
+              ? lastError
+              : new Error(
+                  typeof lastError === 'string'
+                    ? lastError
+                    : 'Failed to delegate to any model in the chain.',
+                );
           }
 
           stream.end();

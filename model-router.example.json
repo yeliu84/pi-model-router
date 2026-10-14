@@ -49,7 +49,11 @@
       "low": { "model": "google/gemini-flash-lite-latest", "thinking": "off" }
     },
     "deep": {
-      "high": { "model": "openai/o1-preview", "thinking": "xhigh", "thinkingLevels": ["xhigh", "high", "medium", "low"] },
+      "high": {
+        "model": "openai/o1-preview",
+        "thinking": "xhigh",
+        "thinkingLevels": ["xhigh", "high", "medium", "low"]
+      },
       "medium": { "model": "gpt-pro", "thinking": "medium" },
       "low": { "model": "flash", "thinking": "low" }
     },

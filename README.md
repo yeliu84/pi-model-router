@@ -65,31 +65,31 @@ Copy the example config to one of:
 
 ### Configuration Fields
 
-| Field                   | Description                                                                       |
-| ----------------------- | --------------------------------------------------------------------------------- |
-| `classifierModel`       | (Optional) Model used to categorize intent. Supports model aliases. If omitted, fast heuristics are used. |
-| `maxSessionBudget`      | (Optional) USD budget for the session. Forces `medium` tier once exceeded.        |
-| `phaseBias`             | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`. |
-| `rules`                 | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).    |
-| `models`                | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`. |
-| `profiles`              | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`. |
+| Field              | Description                                                                                                                                                      |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `classifierModel`  | (Optional) Model used to categorize intent. Supports model aliases. If omitted, fast heuristics are used.                                                        |
+| `maxSessionBudget` | (Optional) USD budget for the session. Forces `medium` tier once exceeded.                                                                                       |
+| `phaseBias`        | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                |
+| `rules`            | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).                                                                                   |
+| `models`           | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`.                                                                       |
+| `profiles`         | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`. |
 
 ## Commands
 
-| Command                     | Description                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------- |
-| `/router`                   | Show detailed status, current profile, spend, and settings.                     |
-| `/router status`            | Alias for `/router` (show current status).                                      |
-| `/router profile [name]`    | Switch to a profile or list available ones (enables router if off).             |
-| `/router pin <t\|a>`        | Pin a tier (high/medium/low/auto) for the active profile.                      |
-| `/router fix <tier>`        | Correct the _last_ decision and pin that tier for the current profile.          |
-| `/router thinking <level>`  | Override thinking level for all tiers (e.g. `/router thinking max`). Not all tier models may support every level. |
-| `/router thinking <tier> <level>` | Override thinking level for a specific tier (e.g. `/router thinking low off`). |
-| `/router disable`           | Disable the router and switch back to the last non-router model.                |
-| `/router widget <on\|off>`  | Toggle the persistent state widget (supports `toggle`).                         |
-| `/router debug <on\|off>`   | Toggle turn-by-turn routing notifications (supports `toggle`, `clear`, `show`). |
-| `/router reload`            | Hot-reload the configuration JSON.                                              |
-| `/router help`              | Show usage help for all subcommands.                                            |
+| Command                           | Description                                                                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `/router`                         | Show detailed status, current profile, spend, and settings.                                                       |
+| `/router status`                  | Alias for `/router` (show current status).                                                                        |
+| `/router profile [name]`          | Switch to a profile or list available ones (enables router if off).                                               |
+| `/router pin <t\|a>`              | Pin a tier (high/medium/low/auto) for the active profile.                                                         |
+| `/router fix <tier>`              | Correct the _last_ decision and pin that tier for the current profile.                                            |
+| `/router thinking <level>`        | Override thinking level for all tiers (e.g. `/router thinking max`). Not all tier models may support every level. |
+| `/router thinking <tier> <level>` | Override thinking level for a specific tier (e.g. `/router thinking low off`).                                    |
+| `/router disable`                 | Disable the router and switch back to the last non-router model.                                                  |
+| `/router widget <on\|off>`        | Toggle the persistent state widget (supports `toggle`).                                                           |
+| `/router debug <on\|off>`         | Toggle turn-by-turn routing notifications (supports `toggle`, `clear`, `show`).                                   |
+| `/router reload`                  | Hot-reload the configuration JSON.                                                                                |
+| `/router help`                    | Show usage help for all subcommands.                                                                              |
 
 ## Documentation
 

@@ -14,13 +14,9 @@ import type {
   ClassifierConfig,
   RouterModelCapabilityLookup,
 } from './types';
-import {
-  DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_MAX_TOKENS,
-} from './constants';
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 
 export const ROUTER_TIERS = ['high', 'medium', 'low'] as const;
-
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   'off',
@@ -33,7 +29,11 @@ export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 ];
 export const ROUTER_PIN_VALUES = ['auto', 'high', 'medium', 'low'] as const;
 
-export const DEFAULT_THINKING_LEVELS: readonly ThinkingLevel[] = ['high', 'medium', 'low'] as const;
+export const DEFAULT_THINKING_LEVELS: readonly ThinkingLevel[] = [
+  'high',
+  'medium',
+  'low',
+] as const;
 
 export const isObjectRecord = (
   value: unknown,
@@ -158,13 +158,17 @@ export const normalizeModelsMap = (
 
   for (const [alias, entry] of Object.entries(raw)) {
     if (!isObjectRecord(entry)) {
-      warnings.push(`Ignored invalid model definition "${alias}": expected an object.`);
+      warnings.push(
+        `Ignored invalid model definition "${alias}": expected an object.`,
+      );
       continue;
     }
 
     const model = typeof entry.model === 'string' ? entry.model.trim() : '';
     if (!model) {
-      warnings.push(`Model definition "${alias}" is missing the "model" field. Skipped.`);
+      warnings.push(
+        `Model definition "${alias}" is missing the "model" field. Skipped.`,
+      );
       continue;
     }
 
@@ -202,13 +206,19 @@ export const normalizeModelsMap = (
 
     let thinkingLevels: ThinkingLevel[] | undefined;
     if (Array.isArray(entry.thinkingLevels)) {
-      thinkingLevels = entry.thinkingLevels.filter(
-        (l): l is ThinkingLevel => isThinkingLevel(l),
+      thinkingLevels = entry.thinkingLevels.filter((l): l is ThinkingLevel =>
+        isThinkingLevel(l),
       );
       if (thinkingLevels.length === 0) thinkingLevels = undefined;
     }
 
-    result[alias] = { model, contextWindow, maxTokens, reasoning, thinkingLevels };
+    result[alias] = {
+      model,
+      contextWindow,
+      maxTokens,
+      reasoning,
+      thinkingLevels,
+    };
   }
 
   return result;
@@ -249,9 +259,7 @@ export const normalizeTierConfig = (
     return undefined;
   }
 
-  const thinking = isThinkingLevel(value.thinking)
-    ? value.thinking
-    : 'medium';
+  const thinking = isThinkingLevel(value.thinking) ? value.thinking : 'medium';
   if (value.thinking !== undefined && !isThinkingLevel(value.thinking)) {
     warnings.push(
       `Profile "${profileName}" ${tier} tier has invalid thinking level. Defaulting to medium.`,
@@ -283,7 +291,9 @@ export const normalizeTierConfig = (
       ? value.contextWindow
       : undefined;
   const resolvedContextWindow =
-    tierContextWindow ?? aliasDefinition?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    tierContextWindow ??
+    aliasDefinition?.contextWindow ??
+    DEFAULT_CONTEXT_WINDOW;
 
   // Resolve maxTokens: tier config > alias > hardcoded default
   const tierMaxTokens =
@@ -302,13 +312,14 @@ export const normalizeTierConfig = (
   // Validate tier-level thinkingLevels array
   let tierThinkingLevels: ThinkingLevel[] | undefined;
   if (Array.isArray(value.thinkingLevels)) {
-    tierThinkingLevels = value.thinkingLevels.filter(
-      (l): l is ThinkingLevel => isThinkingLevel(l),
+    tierThinkingLevels = value.thinkingLevels.filter((l): l is ThinkingLevel =>
+      isThinkingLevel(l),
     );
     if (tierThinkingLevels.length === 0) tierThinkingLevels = undefined;
   }
 
-  const explicitThinkingLevels = tierThinkingLevels ?? aliasDefinition?.thinkingLevels;
+  const explicitThinkingLevels =
+    tierThinkingLevels ?? aliasDefinition?.thinkingLevels;
   const baseThinkingLevels: ThinkingLevel[] =
     explicitThinkingLevels ??
     (effectiveReasoning === false ? [] : [...DEFAULT_THINKING_LEVELS]);
@@ -316,7 +327,11 @@ export const normalizeTierConfig = (
   // Auto-add the tier's thinking value if it's not 'off' and not already present,
   // but only if the user didn't explicitly constrain the thinkingLevels array.
   const resolvedThinkingLevels: ThinkingLevel[] = [...baseThinkingLevels];
-  if (!explicitThinkingLevels && thinking !== 'off' && !resolvedThinkingLevels.includes(thinking)) {
+  if (
+    !explicitThinkingLevels &&
+    thinking !== 'off' &&
+    !resolvedThinkingLevels.includes(thinking)
+  ) {
     resolvedThinkingLevels.push(thinking);
   }
 
@@ -372,9 +387,7 @@ export const normalizeConfig = (
     );
 
     if (!high && !medium && !low) {
-      warnings.push(
-        `Profile "${name}" has no valid tiers. Skipped.`,
-      );
+      warnings.push(`Profile "${name}" has no valid tiers. Skipped.`);
       continue;
     }
 
@@ -432,7 +445,8 @@ export const normalizeConfig = (
       );
     }
   } else if (isObjectRecord(rawClassifier)) {
-    const modelRef = typeof rawClassifier.model === 'string' ? rawClassifier.model.trim() : '';
+    const modelRef =
+      typeof rawClassifier.model === 'string' ? rawClassifier.model.trim() : '';
     if (modelRef) {
       const resolved = resolveModelRef(
         modelRef,
@@ -455,7 +469,9 @@ export const normalizeConfig = (
         );
       }
     } else {
-      warnings.push('classifierModel object is missing the "model" field. Ignored.');
+      warnings.push(
+        'classifierModel object is missing the "model" field. Ignored.',
+      );
     }
   }
 
@@ -576,7 +592,9 @@ export const resolveThinkingLevels = (
   const map = registryModel?.thinkingLevelMap;
   if (map) {
     return THINKING_LEVELS.filter(
-      (l) => l !== 'off' && (l === 'xhigh' || l === 'max' ? map[l] != null : map[l] !== null),
+      (l) =>
+        l !== 'off' &&
+        (l === 'xhigh' || l === 'max' ? map[l] != null : map[l] !== null),
     );
   }
   return tierConfig?.resolvedThinkingLevels;

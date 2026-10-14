@@ -27,10 +27,7 @@ export interface RouterModelCapabilityLookup {
     | undefined;
 }
 
-export type RouterModelLookup = Pick<
-  ExtensionContext['modelRegistry'],
-  'find'
->;
+export type RouterModelLookup = Pick<ExtensionContext['modelRegistry'], 'find'>;
 
 export type RouterModelRegistry = Pick<
   ExtensionContext['modelRegistry'],
@@ -98,14 +95,14 @@ export interface RouterExtensionAPI<
     name: string,
     options: {
       description?: string;
-      getArgumentCompletions?: (
-        argumentPrefix: string,
-      ) =>
+      getArgumentCompletions?: (argumentPrefix: string) =>
         | Array<{ value: string; label: string; description?: string }>
         | null
-        | Promise<
-            Array<{ value: string; label: string; description?: string }> | null
-          >;
+        | Promise<Array<{
+            value: string;
+            label: string;
+            description?: string;
+          }> | null>;
       handler: (args: string, ctx: TCtx) => Promise<void>;
     },
   ) => void;

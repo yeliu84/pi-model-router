@@ -25,11 +25,7 @@ import {
   type Model,
   type ToolResultMessage,
 } from '@earendil-works/pi-ai';
-import type {
-  RouterModelRegistry,
-  RouterProfile,
-  RoutingRule,
-} from './types';
+import type { RouterModelRegistry, RouterProfile, RoutingRule } from './types';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
@@ -453,7 +449,8 @@ describe('routing.ts', () => {
         messages: [
           {
             role: 'user',
-            content: 'what about this particular scenario that we discussed earlier today',
+            content:
+              'what about this particular scenario that we discussed earlier today',
             timestamp: Date.now(),
           },
         ],
@@ -465,7 +462,15 @@ describe('routing.ts', () => {
         'planning',
         'Previous planning',
       );
-      const decision = decideRouting(context, 'p', profile, previous, undefined, undefined, 0.5);
+      const decision = decideRouting(
+        context,
+        'p',
+        profile,
+        previous,
+        undefined,
+        undefined,
+        0.5,
+      );
       expect(decision.tier).toBe('high');
       expect(decision.phase).toBe('planning');
       expect(decision.reasoning).toContain('planning-phase bias');
@@ -538,7 +543,8 @@ describe('routing.ts', () => {
         messages: [
           {
             role: 'user',
-            content: 'i wonder about some random topic that doesnt match any particular keyword category here today now',
+            content:
+              'i wonder about some random topic that doesnt match any particular keyword category here today now',
             timestamp: Date.now(),
           },
         ],

@@ -382,7 +382,11 @@ describe('config.ts', () => {
   describe('resolveContextWindow and resolveMaxTokens – additional coverage', () => {
     it('should return default when tier is missing from profile', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedContextWindow: 60000, resolvedMaxTokens: 4000 },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedContextWindow: 60000,
+          resolvedMaxTokens: 4000,
+        },
       };
       expect(resolveContextWindow('low', profile, undefined)).toBe(128_000);
       expect(resolveMaxTokens('low', profile, undefined)).toBe(16_384);
@@ -390,24 +394,36 @@ describe('config.ts', () => {
 
     it('should fall back to resolvedContextWindow/MaxTokens when registry model has no values', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedContextWindow: 60000, resolvedMaxTokens: 4000 },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedContextWindow: 60000,
+          resolvedMaxTokens: 4000,
+        },
       };
       const registryNoValues: RouterModelCapabilityLookup = {
         find: () => ({}),
       };
-      expect(resolveContextWindow('high', profile, registryNoValues)).toBe(60000);
+      expect(resolveContextWindow('high', profile, registryNoValues)).toBe(
+        60000,
+      );
       expect(resolveMaxTokens('high', profile, registryNoValues)).toBe(4000);
     });
 
     it('should catch parseCanonicalModelRef errors and return resolved values', () => {
       const profile: RouterProfile = {
-        high: { model: 'invalid-no-slash', resolvedContextWindow: 50000, resolvedMaxTokens: 3000 },
+        high: {
+          model: 'invalid-no-slash',
+          resolvedContextWindow: 50000,
+          resolvedMaxTokens: 3000,
+        },
       };
       const registryWithFind: RouterModelCapabilityLookup = {
         find: () => ({ contextWindow: 99999, maxTokens: 8888 }),
       };
       // parseCanonicalModelRef will throw for 'invalid-no-slash', so it falls through to resolved values
-      expect(resolveContextWindow('high', profile, registryWithFind)).toBe(50000);
+      expect(resolveContextWindow('high', profile, registryWithFind)).toBe(
+        50000,
+      );
       expect(resolveMaxTokens('high', profile, registryWithFind)).toBe(3000);
     });
   });
@@ -415,8 +431,14 @@ describe('config.ts', () => {
   describe('collectProfileThinkingLevels', () => {
     it('should collect thinking levels from all tiers', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high', 'xhigh'] },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium', 'low'] },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedThinkingLevels: ['high', 'xhigh'],
+        },
+        medium: {
+          model: 'openai/gpt-4o-mini',
+          resolvedThinkingLevels: ['medium', 'low'],
+        },
       };
       const levels = collectProfileThinkingLevels(profile);
       expect(levels.has('high')).toBe(true);
@@ -444,14 +466,21 @@ describe('config.ts', () => {
 
     it('should include max and xhigh from modelRegistry thinkingLevelMap', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-6', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+        high: {
+          model: 'openai/gpt-6',
+          resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'],
+        },
       };
       const registry: RouterModelCapabilityLookup = {
         find: (provider, modelId) =>
           provider === 'openai' && modelId === 'gpt-6'
             ? {
                 reasoning: true,
-                thinkingLevelMap: { minimal: 'low', xhigh: 'xhigh', max: 'max' },
+                thinkingLevelMap: {
+                  minimal: 'low',
+                  xhigh: 'xhigh',
+                  max: 'max',
+                },
               }
             : undefined,
       };
@@ -465,7 +494,10 @@ describe('config.ts', () => {
   describe('resolveThinkingLevels', () => {
     it('should derive supported levels from registry thinkingLevelMap including max and excluding null levels', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-6', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+        high: {
+          model: 'openai/gpt-6',
+          resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'],
+        },
       };
       const registry: RouterModelCapabilityLookup = {
         find: () => ({
@@ -484,7 +516,10 @@ describe('config.ts', () => {
 
     it('should return empty array when registry model has reasoning=false', () => {
       const profile: RouterProfile = {
-        low: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['low', 'medium'] },
+        low: {
+          model: 'openai/gpt-4o-mini',
+          resolvedThinkingLevels: ['low', 'medium'],
+        },
       };
       const registry: RouterModelCapabilityLookup = {
         find: () => ({ reasoning: false }),
@@ -494,7 +529,10 @@ describe('config.ts', () => {
 
     it('should fall back to resolvedThinkingLevels when registry model has no thinkingLevelMap', () => {
       const profile: RouterProfile = {
-        high: { model: 'anthropic/claude-sonnet-4-5', resolvedThinkingLevels: ['low', 'medium', 'high'] },
+        high: {
+          model: 'anthropic/claude-sonnet-4-5',
+          resolvedThinkingLevels: ['low', 'medium', 'high'],
+        },
       };
       const registry: RouterModelCapabilityLookup = {
         find: () => ({ reasoning: true }),
@@ -510,8 +548,14 @@ describe('config.ts', () => {
   describe('getUnsupportedTiers', () => {
     it('should return tiers that do not include the requested thinking level', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high', 'xhigh'] },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium', 'low'] },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedThinkingLevels: ['high', 'xhigh'],
+        },
+        medium: {
+          model: 'openai/gpt-4o-mini',
+          resolvedThinkingLevels: ['medium', 'low'],
+        },
         low: { model: 'openai/gpt-4o-micro', resolvedThinkingLevels: ['low'] },
       };
       const unsupported = getUnsupportedTiers(profile, 'xhigh');
@@ -520,8 +564,14 @@ describe('config.ts', () => {
 
     it('should return empty array if all tiers support the level', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-4o', resolvedThinkingLevels: ['high', 'medium'] },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium'] },
+        high: {
+          model: 'openai/gpt-4o',
+          resolvedThinkingLevels: ['high', 'medium'],
+        },
+        medium: {
+          model: 'openai/gpt-4o-mini',
+          resolvedThinkingLevels: ['medium'],
+        },
       };
       const unsupported = getUnsupportedTiers(profile, 'medium');
       expect(unsupported).toEqual([]);
@@ -538,7 +588,10 @@ describe('config.ts', () => {
     it('should treat tiers with undefined resolvedThinkingLevels as unsupported', () => {
       const profile: RouterProfile = {
         high: { model: 'openai/gpt-4o' },
-        medium: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['medium'] },
+        medium: {
+          model: 'openai/gpt-4o-mini',
+          resolvedThinkingLevels: ['medium'],
+        },
       };
       const unsupported = getUnsupportedTiers(profile, 'medium');
       expect(unsupported).toEqual(['high']);
@@ -546,13 +599,22 @@ describe('config.ts', () => {
 
     it('should consult modelRegistry thinkingLevelMap when checking max support', () => {
       const profile: RouterProfile = {
-        high: { model: 'openai/gpt-6', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
-        medium: { model: 'openai/gpt-5', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+        high: {
+          model: 'openai/gpt-6',
+          resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'],
+        },
+        medium: {
+          model: 'openai/gpt-5',
+          resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'],
+        },
       };
       const registry: RouterModelCapabilityLookup = {
         find: (_provider, modelId) =>
           modelId === 'gpt-6'
-            ? { reasoning: true, thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } }
+            ? {
+                reasoning: true,
+                thinkingLevelMap: { xhigh: 'xhigh', max: 'max' },
+              }
             : { reasoning: true },
       };
       expect(getUnsupportedTiers(profile, 'max', registry)).toEqual(['medium']);
@@ -561,8 +623,12 @@ describe('config.ts', () => {
 
   describe('clampThinkingLevel', () => {
     it('should preserve max when supported and clamp down to xhigh or high when unsupported', () => {
-      expect(clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh', 'max'])).toBe('max');
-      expect(clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh'])).toBe('xhigh');
+      expect(
+        clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh', 'max']),
+      ).toBe('max');
+      expect(
+        clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh']),
+      ).toBe('xhigh');
       expect(clampThinkingLevel('max', ['low', 'medium', 'high'])).toBe('high');
     });
   });

@@ -684,5 +684,74 @@ describe('routing.ts', () => {
         }),
       );
     });
+
+    it('should override model.baseUrl with auth.baseUrl when running classifier (e.g. GitHub Copilot proxy-ep)', async () => {
+      const mockStream = createTextDeltaStream(
+        'Tier: low\n',
+        'Reasoning: Copilot classifier.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
+
+      const copilotRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: 'copilot-oauth-token',
+          headers: {},
+          baseUrl: 'https://api.enterprise.githubcopilot.com',
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        copilotRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'Copilot classifier.',
+      });
+      expect(streamSimple).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'gpt-4o',
+          baseUrl: 'https://api.enterprise.githubcopilot.com',
+        }),
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: 'copilot-oauth-token',
+        }),
+      );
+    });
+
+    it('should use custom registered provider streamSimple when available', async () => {
+      vi.mocked(streamSimple).mockClear();
+      const customStreamFn = vi
+        .fn()
+        .mockReturnValue(
+          createTextDeltaStream(
+            'Tier: medium\n',
+            'Reasoning: Custom provider classifier.',
+          ),
+        );
+      const customProviderRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        getRegisteredProviderConfig: vi.fn().mockReturnValue({
+          api: 'openai-completions',
+          streamSimple: customStreamFn,
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        customProviderRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'medium',
+        reasoning: 'Custom provider classifier.',
+      });
+      expect(customStreamFn).toHaveBeenCalled();
+      expect(streamSimple).not.toHaveBeenCalled();
+    });
   });
 });

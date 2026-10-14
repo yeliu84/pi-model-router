@@ -1,5 +1,6 @@
 import {
   createAssistantMessageEventStream,
+  normalizeContext,
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
@@ -525,19 +526,37 @@ export const registerRouterProvider = <
                 ? { ...targetModel, baseUrl: auth.baseUrl }
                 : targetModel;
 
-              const delegatedStream = streamSimple(
-                effectiveTargetModel,
-                effectiveContext,
-                {
-                  ...delegationOptions,
-                  apiKey,
-                  headers,
-                  ...(auth.env ? { env: auth.env } : {}),
-                  ...(delegatedReasoning
-                    ? { reasoning: delegatedReasoning }
-                    : {}),
-                },
+              const providerConfig = registry.getRegisteredProviderConfig?.(
+                effectiveTargetModel.provider,
               );
+              const customStreamSimple =
+                providerConfig?.streamSimple &&
+                (!providerConfig.api ||
+                  providerConfig.api === effectiveTargetModel.api)
+                  ? providerConfig.streamSimple
+                  : undefined;
+
+              const streamOptions: SimpleStreamOptions = {
+                ...delegationOptions,
+                apiKey,
+                headers,
+                ...(auth.env ? { env: auth.env } : {}),
+                ...(delegatedReasoning
+                  ? { reasoning: delegatedReasoning }
+                  : {}),
+              };
+
+              const delegatedStream = customStreamSimple
+                ? customStreamSimple(
+                    effectiveTargetModel,
+                    normalizeContext(effectiveContext),
+                    streamOptions,
+                  )
+                : streamSimple(
+                    effectiveTargetModel,
+                    effectiveContext,
+                    streamOptions,
+                  );
 
               let contentReceived = false;
               for await (const event of delegatedStream) {

@@ -686,6 +686,143 @@ describe('provider.ts', () => {
       expect(result.errorMessage).toContain('model unavailable');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
+
+    it('should merge targetModel.headers from models.json with auth.headers and allow delegation without apiKey', async () => {
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) =>
+        createTestModel({
+          provider,
+          id: modelId,
+          headers: {
+            'cf-aig-authorization': 'Bearer cf-token',
+            'x-custom': 'from-model',
+          },
+        });
+      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
+        ok: true,
+        apiKey: undefined,
+        headers: {
+          'x-custom': 'from-auth',
+          'x-extra': 'extra-val',
+        },
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      vi.mocked(streamSimple).mockReturnValue(
+        createDelegateStream('custom headers response', 0.001),
+      );
+
+      const model = createTestModel({
+        id: 'balanced',
+        provider: 'router',
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
+
+      registeredProviderOptions!.streamSimple!(model, context);
+
+      await vi.waitFor(
+        () => {
+          expect(streamSimple).toHaveBeenCalledWith(
+            expect.objectContaining({ id: 'gpt-4o-mini' }),
+            expect.anything(),
+            expect.objectContaining({
+              apiKey: undefined,
+              headers: {
+                'cf-aig-authorization': 'Bearer cf-token',
+                'x-custom': 'from-auth',
+                'x-extra': 'extra-val',
+              },
+            }),
+          );
+          expect(mockState.accumulatedCost).toBe(0.001);
+        },
+        { timeout: 1000 },
+      );
+    });
+
+    it('should override targetModel.baseUrl with auth.baseUrl when delegating (e.g. GitHub Copilot proxy-ep)', async () => {
+      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
+        ok: true,
+        apiKey: 'copilot-oauth-token',
+        headers: {},
+        baseUrl: 'https://api.enterprise.githubcopilot.com',
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      vi.mocked(streamSimple).mockReturnValue(
+        createDelegateStream('copilot response', 0.002),
+      );
+
+      const model = createTestModel({
+        id: 'balanced',
+        provider: 'router',
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
+
+      registeredProviderOptions!.streamSimple!(model, context);
+
+      await vi.waitFor(
+        () => {
+          expect(streamSimple).toHaveBeenCalledWith(
+            expect.objectContaining({
+              id: 'gpt-4o-mini',
+              baseUrl: 'https://api.enterprise.githubcopilot.com',
+            }),
+            expect.anything(),
+            expect.objectContaining({
+              apiKey: 'copilot-oauth-token',
+            }),
+          );
+          expect(mockState.accumulatedCost).toBe(0.002);
+        },
+        { timeout: 1000 },
+      );
+    });
+
+    it('should delegate to custom registered provider streamSimple when available', async () => {
+      const customStreamFn = vi
+        .fn()
+        .mockReturnValue(createDelegateStream('from custom provider', 0.004));
+      mockState.currentModelRegistry!.getRegisteredProviderConfig = vi
+        .fn()
+        .mockReturnValue({
+          api: 'openai-completions',
+          streamSimple: customStreamFn,
+        });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      const model = createTestModel({
+        id: 'balanced',
+        provider: 'router',
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
+
+      registeredProviderOptions!.streamSimple!(model, context);
+
+      await vi.waitFor(
+        () => {
+          expect(customStreamFn).toHaveBeenCalledWith(
+            expect.objectContaining({ id: 'gpt-4o-mini' }),
+            expect.anything(),
+            expect.objectContaining({ apiKey: 'test-key' }),
+          );
+          expect(streamSimple).not.toHaveBeenCalled();
+          expect(mockState.accumulatedCost).toBe(0.004);
+        },
+        { timeout: 1000 },
+      );
+    });
   });
 
   describe('waitForRegistry', () => {

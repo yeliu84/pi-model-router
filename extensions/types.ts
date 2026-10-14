@@ -32,7 +32,10 @@ export type RouterModelLookup = Pick<ExtensionContext['modelRegistry'], 'find'>;
 export type RouterModelRegistry = Pick<
   ExtensionContext['modelRegistry'],
   'find' | 'getApiKeyAndHeaders'
->;
+> &
+  Partial<
+    Pick<ExtensionContext['modelRegistry'], 'getRegisteredProviderConfig'>
+  >;
 
 export interface RouterUIContext {
   ui: {

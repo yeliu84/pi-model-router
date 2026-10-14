@@ -386,6 +386,7 @@ export const registerCommands = <
       const unsupported = getUnsupportedTiers(
         state.currentConfig.profiles[currentProfile],
         nextLevel,
+        ctx.modelRegistry,
       );
       if (unsupported.length > 0) {
         ctx.ui.notify(

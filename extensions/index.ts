@@ -517,6 +517,7 @@ const routerExtension = <
       const unsupported = getUnsupportedTiers(
         currentConfig.profiles[selectedProfile],
         event.level,
+        ctx.modelRegistry,
       );
       if (unsupported.length > 0) {
         ctx.ui.notify(

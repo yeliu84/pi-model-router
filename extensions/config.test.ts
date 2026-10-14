@@ -12,8 +12,10 @@ import {
   resolveProfileName,
   resolveContextWindow,
   resolveMaxTokens,
+  resolveThinkingLevels,
   collectProfileThinkingLevels,
   getUnsupportedTiers,
+  clampThinkingLevel,
   isObjectRecord,
   isThinkingLevel,
   isRouterTier,
@@ -439,6 +441,70 @@ describe('config.ts', () => {
       expect(levels.size).toBe(1);
       expect(levels.has('high')).toBe(true);
     });
+
+    it('should include max and xhigh from modelRegistry thinkingLevelMap', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-6', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+      };
+      const registry: RouterModelCapabilityLookup = {
+        find: (provider, modelId) =>
+          provider === 'openai' && modelId === 'gpt-6'
+            ? {
+                reasoning: true,
+                thinkingLevelMap: { minimal: 'low', xhigh: 'xhigh', max: 'max' },
+              }
+            : undefined,
+      };
+      const levels = collectProfileThinkingLevels(profile, registry);
+      expect(levels.has('max')).toBe(true);
+      expect(levels.has('xhigh')).toBe(true);
+      expect(levels.has('high')).toBe(true);
+    });
+  });
+
+  describe('resolveThinkingLevels', () => {
+    it('should derive supported levels from registry thinkingLevelMap including max and excluding null levels', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-6', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+      };
+      const registry: RouterModelCapabilityLookup = {
+        find: () => ({
+          reasoning: true,
+          thinkingLevelMap: { minimal: null, xhigh: 'xhigh', max: 'max' },
+        }),
+      };
+      expect(resolveThinkingLevels('high', profile, registry)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+    });
+
+    it('should return empty array when registry model has reasoning=false', () => {
+      const profile: RouterProfile = {
+        low: { model: 'openai/gpt-4o-mini', resolvedThinkingLevels: ['low', 'medium'] },
+      };
+      const registry: RouterModelCapabilityLookup = {
+        find: () => ({ reasoning: false }),
+      };
+      expect(resolveThinkingLevels('low', profile, registry)).toEqual([]);
+    });
+
+    it('should fall back to resolvedThinkingLevels when registry model has no thinkingLevelMap', () => {
+      const profile: RouterProfile = {
+        high: { model: 'anthropic/claude-sonnet-4-5', resolvedThinkingLevels: ['low', 'medium', 'high'] },
+      };
+      const registry: RouterModelCapabilityLookup = {
+        find: () => ({ reasoning: true }),
+      };
+      expect(resolveThinkingLevels('high', profile, registry)).toEqual([
+        'low',
+        'medium',
+        'high',
+      ]);
+    });
   });
 
   describe('getUnsupportedTiers', () => {
@@ -476,6 +542,28 @@ describe('config.ts', () => {
       };
       const unsupported = getUnsupportedTiers(profile, 'medium');
       expect(unsupported).toEqual(['high']);
+    });
+
+    it('should consult modelRegistry thinkingLevelMap when checking max support', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-6', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+        medium: { model: 'openai/gpt-5', resolvedThinkingLevels: ['minimal', 'low', 'medium', 'high'] },
+      };
+      const registry: RouterModelCapabilityLookup = {
+        find: (_provider, modelId) =>
+          modelId === 'gpt-6'
+            ? { reasoning: true, thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } }
+            : { reasoning: true },
+      };
+      expect(getUnsupportedTiers(profile, 'max', registry)).toEqual(['medium']);
+    });
+  });
+
+  describe('clampThinkingLevel', () => {
+    it('should preserve max when supported and clamp down to xhigh or high when unsupported', () => {
+      expect(clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh', 'max'])).toBe('max');
+      expect(clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh'])).toBe('xhigh');
+      expect(clampThinkingLevel('max', ['low', 'medium', 'high'])).toBe('high');
     });
   });
 

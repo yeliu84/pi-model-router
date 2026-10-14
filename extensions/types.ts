@@ -21,6 +21,7 @@ export interface RouterModelCapabilityLookup {
         contextWindow?: number;
         maxTokens?: number;
         reasoning?: boolean;
+        thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
         input?: readonly string[];
       }
     | undefined;

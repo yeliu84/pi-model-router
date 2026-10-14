@@ -508,6 +508,19 @@ export const resolveProfileName = (
   return undefined;
 };
 
+const findTierModel = (
+  tierConfig: RoutedTierConfig | undefined,
+  modelRegistry?: RouterModelCapabilityLookup,
+) => {
+  if (!tierConfig || !modelRegistry) return undefined;
+  try {
+    const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
+    return modelRegistry.find(provider, modelId);
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * Resolve the effective context window for a specific tier at runtime,
  * incorporating the API model registry as the highest-priority source.
@@ -520,19 +533,11 @@ export const resolveContextWindow = (
   modelRegistry: RouterModelCapabilityLookup | undefined,
 ): number => {
   const tierConfig = profile[tier];
-  if (!tierConfig) return DEFAULT_CONTEXT_WINDOW;
-
-  // 1. API value (highest priority)
-  if (modelRegistry) {
-    try {
-      const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
-      const registryModel = modelRegistry.find(provider, modelId);
-      if (registryModel?.contextWindow) return registryModel.contextWindow;
-    } catch { /* ignore */ }
-  }
-
-  // 2-4. Pre-resolved during config normalization (tier > alias > hardcoded)
-  return tierConfig.resolvedContextWindow ?? DEFAULT_CONTEXT_WINDOW;
+  return (
+    findTierModel(tierConfig, modelRegistry)?.contextWindow ||
+    tierConfig?.resolvedContextWindow ||
+    DEFAULT_CONTEXT_WINDOW
+  );
 };
 
 /**
@@ -547,19 +552,34 @@ export const resolveMaxTokens = (
   modelRegistry: RouterModelCapabilityLookup | undefined,
 ): number => {
   const tierConfig = profile[tier];
-  if (!tierConfig) return DEFAULT_MAX_TOKENS;
+  return (
+    findTierModel(tierConfig, modelRegistry)?.maxTokens ||
+    tierConfig?.resolvedMaxTokens ||
+    DEFAULT_MAX_TOKENS
+  );
+};
 
-  // 1. API value (highest priority)
-  if (modelRegistry) {
-    try {
-      const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
-      const registryModel = modelRegistry.find(provider, modelId);
-      if (registryModel?.maxTokens) return registryModel.maxTokens;
-    } catch { /* ignore */ }
+/**
+ * Resolve the effective supported thinking levels for a specific tier at runtime,
+ * incorporating the API model registry's thinkingLevelMap when available.
+ *
+ * Resolution chain: API (thinkingLevelMap / reasoning=false) > tier config > model alias > default
+ */
+export const resolveThinkingLevels = (
+  tier: RouterTier,
+  profile: RouterProfile,
+  modelRegistry?: RouterModelCapabilityLookup,
+): ThinkingLevel[] | undefined => {
+  const tierConfig = profile[tier];
+  const registryModel = findTierModel(tierConfig, modelRegistry);
+  if (registryModel?.reasoning === false) return [];
+  const map = registryModel?.thinkingLevelMap;
+  if (map) {
+    return THINKING_LEVELS.filter(
+      (l) => l !== 'off' && (l === 'xhigh' || l === 'max' ? map[l] != null : map[l] !== null),
+    );
   }
-
-  // 2-4. Pre-resolved during config normalization (tier > alias > hardcoded)
-  return tierConfig.resolvedMaxTokens ?? DEFAULT_MAX_TOKENS;
+  return tierConfig?.resolvedThinkingLevels;
 };
 
 /**
@@ -568,36 +588,28 @@ export const resolveMaxTokens = (
  */
 export const collectProfileThinkingLevels = (
   profile: RouterProfile,
-): Set<ThinkingLevel> => {
-  const levels = new Set<ThinkingLevel>();
-  for (const tier of ROUTER_TIERS) {
-    const tierConfig = profile[tier];
-    if (!tierConfig?.resolvedThinkingLevels) continue;
-    for (const level of tierConfig.resolvedThinkingLevels) {
-      levels.add(level);
-    }
-  }
-  return levels;
-};
+  modelRegistry?: RouterModelCapabilityLookup,
+): Set<ThinkingLevel> =>
+  new Set(
+    ROUTER_TIERS.flatMap(
+      (tier) => resolveThinkingLevels(tier, profile, modelRegistry) ?? [],
+    ),
+  );
 
 /**
  * Returns tier names whose models don't include the given thinking level
- * in their resolvedThinkingLevels.
+ * in their resolved thinking levels.
  */
 export const getUnsupportedTiers = (
   profile: RouterProfile,
   level: ThinkingLevel,
-): string[] => {
-  const unsupported: string[] = [];
-  for (const tier of ROUTER_TIERS) {
-    const tierConfig = profile[tier];
-    if (!tierConfig) continue;
-    if (!tierConfig.resolvedThinkingLevels?.includes(level)) {
-      unsupported.push(tier);
-    }
-  }
-  return unsupported;
-};
+  modelRegistry?: RouterModelCapabilityLookup,
+): string[] =>
+  ROUTER_TIERS.filter(
+    (tier) =>
+      profile[tier] !== undefined &&
+      !resolveThinkingLevels(tier, profile, modelRegistry)?.includes(level),
+  );
 
 /**
  * Clamps a requested thinking level to the highest supported level
@@ -607,16 +619,14 @@ export const clampThinkingLevel = (
   requested: ThinkingLevel,
   supported: ThinkingLevel[] | undefined,
 ): ThinkingLevel => {
-  if (requested === 'off' || !supported || supported.length === 0) {
-    return 'off';
-  }
-  
+  if (requested === 'off' || !supported) return requested;
+
   const reqIdx = THINKING_LEVELS.indexOf(requested);
   for (let i = reqIdx; i >= 0; i--) {
     if (supported.includes(THINKING_LEVELS[i])) {
       return THINKING_LEVELS[i];
     }
   }
-  
+
   return 'off';
 };

@@ -29,6 +29,7 @@ import {
   ROUTER_TIERS,
   resolveContextWindow,
   resolveMaxTokens,
+  resolveThinkingLevels,
   collectProfileThinkingLevels,
   clampThinkingLevel,
 } from './config';
@@ -219,7 +220,10 @@ export const registerRouterProvider = <
     }
 
     const hasReasoning = supportsReasoning(profile, state.currentModelRegistry);
-    const profileLevels = collectProfileThinkingLevels(profile);
+    const profileLevels = collectProfileThinkingLevels(
+      profile,
+      state.currentModelRegistry,
+    );
     // Build thinkingLevelMap from the union of all tier models' declared levels.
     // Only needed if xhigh or max are in the set (pi supports all others by default).
     let thinkingLevelMap: Record<string, string> | undefined;
@@ -482,21 +486,14 @@ export const registerRouterProvider = <
                 model.id,
                 decision.tier,
               );
-              let requestedReasoning = (thinkingOverride ?? decision.thinking);
-              
-              if (requestedReasoning !== 'off' && targetModel.reasoning) {
-                const tierConfig = profile[decision.tier];
-                if (tierConfig?.resolvedThinkingLevels) {
-                  requestedReasoning = clampThinkingLevel(
-                    requestedReasoning as ThinkingLevel,
-                    tierConfig.resolvedThinkingLevels,
-                  ) as typeof requestedReasoning;
-                }
-              }
+              const requestedReasoning = clampThinkingLevel(
+                thinkingOverride ?? decision.thinking,
+                resolveThinkingLevels(decision.tier, profile, registry),
+              );
 
-              const delegatedReasoning =
+              const delegatedReasoning: SimpleStreamOptions['reasoning'] =
                 targetModel.reasoning && requestedReasoning !== 'off'
-                  ? requestedReasoning as SimpleStreamOptions['reasoning']
+                  ? requestedReasoning
                   : undefined;
 
               try {

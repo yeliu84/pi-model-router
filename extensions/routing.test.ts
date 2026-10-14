@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   extractTextFromContent,
+  extractMessageText,
   getLastUserText,
   getRecentConversationText,
   countToolResults,
@@ -14,12 +15,56 @@ import {
   runClassifier,
 } from './routing';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
-import type { Context, Message, UserMessage } from '@earendil-works/pi-ai';
-import type { RouterProfile, RoutingRule } from './types';
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessageEventStream,
+  type Api,
+  type AssistantMessage,
+  type Context,
+  type Message,
+  type Model,
+  type ToolResultMessage,
+} from '@earendil-works/pi-ai';
+import type {
+  RouterModelRegistry,
+  RouterProfile,
+  RoutingRule,
+} from './types';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
 }));
+
+const createAssistantMsg = (text: string): AssistantMessage => ({
+  role: 'assistant',
+  content: [{ type: 'text', text }],
+  api: 'openai-completions',
+  provider: 'openai',
+  model: 'gpt-4o',
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  stopReason: 'stop',
+  timestamp: Date.now(),
+});
+
+const createToolResultMsg = (
+  toolCallId: string,
+  toolName: string,
+  text: string,
+): ToolResultMessage => ({
+  role: 'toolResult',
+  toolCallId,
+  toolName,
+  content: [{ type: 'text', text }],
+  isError: false,
+  timestamp: Date.now(),
+});
 
 describe('routing.ts', () => {
   describe('extractTextFromContent', () => {
@@ -45,6 +90,23 @@ describe('routing.ts', () => {
     });
   });
 
+  describe('extractMessageText', () => {
+    it('should include sections from system messages in TranscriptContext', () => {
+      const systemMessage: Message = {
+        role: 'system',
+        content: 'Base system instructions',
+        sections: {
+          tools: 'Available tools section',
+          removed: null,
+        },
+        timestamp: Date.now(),
+      };
+      expect(extractMessageText(systemMessage)).toBe(
+        'Base system instructions\n\nAvailable tools section',
+      );
+    });
+  });
+
   describe('getLastUserText', () => {
     it('should return empty string if no messages', () => {
       const context: Context = { messages: [] };
@@ -55,17 +117,9 @@ describe('routing.ts', () => {
       const context: Context = {
         messages: [
           { role: 'user', content: 'first user', timestamp: Date.now() },
-          {
-            role: 'assistant',
-            content: 'assistant response',
-            timestamp: Date.now(),
-          } as unknown as Message,
+          createAssistantMsg('assistant response'),
           { role: 'user', content: 'second user', timestamp: Date.now() },
-          {
-            role: 'assistant',
-            content: 'another assistant',
-            timestamp: Date.now(),
-          } as unknown as Message,
+          createAssistantMsg('another assistant'),
         ],
       };
       expect(getLastUserText(context)).toBe('second user');
@@ -73,16 +127,22 @@ describe('routing.ts', () => {
   });
 
   describe('getRecentConversationText', () => {
-    it('should combine last N messages in lowercase', () => {
+    it('should combine last N messages in lowercase and exclude system messages', () => {
       const context: Context = {
         messages: [
+          {
+            role: 'system',
+            content: 'System prompt with Plan: instructions',
+            timestamp: Date.now(),
+          },
           { role: 'user', content: 'First', timestamp: Date.now() },
           { role: 'user', content: 'Second', timestamp: Date.now() },
           { role: 'user', content: 'Third', timestamp: Date.now() },
         ],
       };
-      const result = getRecentConversationText(context, 2);
-      expect(result).toBe('second\nthird');
+      const result = getRecentConversationText(context, 4);
+      expect(result).toBe('first\nsecond\nthird');
+      expect(result).not.toContain('plan:');
     });
   });
 
@@ -91,23 +151,9 @@ describe('routing.ts', () => {
       const context: Context = {
         messages: [
           { role: 'user', content: 'hey', timestamp: Date.now() },
-          {
-            role: 'toolResult',
-            toolCallId: '1',
-            toolName: 't',
-            content: 'result 1',
-            isError: false,
-            timestamp: Date.now(),
-          } as unknown as Message,
+          createToolResultMsg('1', 't', 'result 1'),
           { role: 'user', content: 'ok', timestamp: Date.now() },
-          {
-            role: 'toolResult',
-            toolCallId: '2',
-            toolName: 't',
-            content: 'result 2',
-            isError: false,
-            timestamp: Date.now(),
-          } as unknown as Message,
+          createToolResultMsg('2', 't', 'result 2'),
         ],
       };
       expect(countToolResults(context)).toBe(2);
@@ -128,8 +174,12 @@ describe('routing.ts', () => {
           {
             role: 'user',
             content: [
-              { type: 'image' as const },
-            ] as unknown as UserMessage['content'],
+              {
+                type: 'image',
+                data: 'base64data',
+                mimeType: 'image/png',
+              },
+            ],
             timestamp: Date.now(),
           },
         ],
@@ -452,14 +502,7 @@ describe('routing.ts', () => {
             content: 'ok next step',
             timestamp: Date.now(),
           },
-          {
-            role: 'toolResult',
-            toolCallId: '1',
-            toolName: 'read_file',
-            content: 'file contents',
-            isError: false,
-            timestamp: Date.now(),
-          } as unknown as Message,
+          createToolResultMsg('1', 'read_file', 'file contents'),
           {
             role: 'user',
             content: 'looks good proceed',
@@ -476,11 +519,7 @@ describe('routing.ts', () => {
     it('should detect implementation from recent conversation containing plan:', () => {
       const context: Context = {
         messages: [
-          {
-            role: 'assistant',
-            content: 'Plan:\n1. Do X\n2. Do Y',
-            timestamp: Date.now(),
-          } as unknown as Message,
+          createAssistantMsg('Plan:\n1. Do X\n2. Do Y'),
           {
             role: 'user',
             content: 'sounds good lets go',
@@ -511,30 +550,58 @@ describe('routing.ts', () => {
   });
 
   describe('runClassifier', () => {
-    const mockRegistry = {
+    const createClassifierModel = (
+      provider: string,
+      id: string,
+    ): Model<Api> => ({
+      id,
+      name: id,
+      api: 'openai-completions',
+      provider,
+      baseUrl: 'https://api.openai.com/v1',
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      reasoning: true,
+      contextWindow: 128000,
+      maxTokens: 4096,
+    });
+
+    const createTextDeltaStream = (
+      ...deltas: string[]
+    ): AssistantMessageEventStream => {
+      const stream = createAssistantMessageEventStream();
+      const partial = createAssistantMsg('');
+      for (const delta of deltas) {
+        stream.push({ type: 'text_delta', contentIndex: 0, delta, partial });
+      }
+      stream.end(partial);
+      return stream;
+    };
+
+    const mockRegistry: RouterModelRegistry = {
       find: (provider: string, modelId: string) => {
         if (provider === 'openai' && modelId === 'gpt-4o') {
-          return { provider, id: modelId, reasoning: true } as any;
+          return createClassifierModel(provider, modelId);
         }
         return undefined;
       },
       getApiKeyAndHeaders: async () => ({
-        ok: true as const,
+        ok: true,
         apiKey: 'test-key',
         headers: {},
       }),
-    } as any;
+    };
 
     const context: Context = {
       messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
     };
 
     it('should return parsed classification result from stream delta', async () => {
-      const mockStream = (async function* () {
-        yield { type: 'text_delta', delta: 'Tier: high\n' };
-        yield { type: 'text_delta', delta: 'Reasoning: Needs deep reasoner.' };
-      })();
-      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+      const mockStream = createTextDeltaStream(
+        'Tier: high\n',
+        'Reasoning: Needs deep reasoner.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
 
       const result = await runClassifier(
         'openai/gpt-4o',
@@ -550,10 +617,8 @@ describe('routing.ts', () => {
     });
 
     it('should return undefined if stream fails or format is invalid', async () => {
-      const mockStream = (async function* () {
-        yield { type: 'text_delta', delta: 'Invalid response format' };
-      })();
-      vi.mocked(streamSimple).mockReturnValue(mockStream as any);
+      const mockStream = createTextDeltaStream('Invalid response format');
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
 
       const result = await runClassifier(
         'openai/gpt-4o',

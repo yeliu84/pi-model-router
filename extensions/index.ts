@@ -1,11 +1,10 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from '@earendil-works/pi-coding-agent';
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   type RouterConfig,
-  type RouterPersistedState,
+  type RouterExtensionAPI,
+  type RouterExtensionContext,
+  type RouterModelRegistry,
   type RoutingDecision,
   type RouterPinByProfile,
   type RouterThinkingByProfile,
@@ -16,19 +15,22 @@ import {
   loadRouterConfig,
   profileNames,
   resolveProfileName,
-  parseCanonicalModelRef,
   ROUTER_TIERS,
   getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import { isRouterPersistedState, buildPersistedState } from './state';
-import { updateStatus, formatModelRef } from './ui';
+import { updateStatus } from './ui';
 import { registerCommands } from './commands';
 import { registerRouterProvider } from './provider';
 
-const routerExtension = (pi: ExtensionAPI) => {
+const routerExtension = <
+  TCtx extends RouterExtensionContext = ExtensionContext,
+>(
+  pi: RouterExtensionAPI<TCtx>,
+) => {
   let currentConfig: RouterConfig = { profiles: {} };
-  let currentModelRegistry: ExtensionContext['modelRegistry'] | undefined;
+  let currentModelRegistry: RouterModelRegistry | undefined;
   let currentCwd = process.cwd();
   let lastDecision: RoutingDecision | undefined;
   let debugEnabled = false;
@@ -41,7 +43,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   let debugHistory: RoutingDecision[] = [];
   let lastNonRouterModel: string | undefined;
   let accumulatedCost = 0;
-  let lastExtensionContext: ExtensionContext | undefined;
+  let lastExtensionContext: TCtx | undefined;
   let lastConfigWarnings: string[] = [];
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
@@ -70,21 +72,6 @@ const routerExtension = (pi: ExtensionAPI) => {
       // Extension context may be stale after session teardown.
     } finally {
       isInternalThinkingChange = false;
-    }
-  };
-
-  const getPinnedTierForProfile = (
-    profileName: string,
-  ): RouterTier | undefined => pinnedTierByProfile[profileName];
-
-  const setPinnedTierForProfile = (
-    profileName: string,
-    tier: RouterTier | undefined,
-  ) => {
-    if (tier) {
-      pinnedTierByProfile[profileName] = tier;
-    } else {
-      delete pinnedTierByProfile[profileName];
     }
   };
 
@@ -137,7 +124,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   const actions = {
     persistState,
     syncPiThinkingLevel: setThinkingLevelInternally,
-    updateStatus: (ctx: ExtensionContext) =>
+    updateStatus: (ctx: TCtx) =>
       updateStatus(
         ctx,
         routerEnabled,
@@ -151,7 +138,7 @@ const routerExtension = (pi: ExtensionAPI) => {
         currentConfig,
       ),
     reloadConfig: (
-      ctx?: ExtensionContext,
+      ctx?: TCtx,
       options?: { preserveDebug?: boolean },
     ) => {
       const loaded = loadRouterConfig(currentCwd);
@@ -172,7 +159,7 @@ const routerExtension = (pi: ExtensionAPI) => {
         }
       }
     },
-    ensureValidActiveRouterProfile: async (ctx: ExtensionContext) => {
+    ensureValidActiveRouterProfile: async (ctx: TCtx) => {
       if (ctx.model?.provider !== 'router') {
         return;
       }
@@ -192,7 +179,7 @@ const routerExtension = (pi: ExtensionAPI) => {
     },
     switchToRouterProfile: async (
       profileName: string,
-      ctx: ExtensionContext,
+      ctx: TCtx,
       strict = true,
     ) => {
       if (!currentConfig.profiles[profileName]) {
@@ -284,7 +271,7 @@ const routerExtension = (pi: ExtensionAPI) => {
 
   actions.reloadConfig();
 
-  const restoreStateFromSession = async (ctx: ExtensionContext) => {
+  const restoreStateFromSession = async (ctx: TCtx) => {
     lastExtensionContext = ctx;
     currentModelRegistry = ctx.modelRegistry;
     currentCwd = ctx.cwd;
@@ -313,7 +300,8 @@ const routerExtension = (pi: ExtensionAPI) => {
         : lastNonRouterModel;
     lastDecision = undefined;
 
-    const entries = ctx.sessionManager.getBranch() as CustomSessionEntry[];
+    const entries: readonly CustomSessionEntry[] =
+      ctx.sessionManager.getBranch();
     const savedState = entries
       .filter(
         (entry) =>
@@ -451,7 +439,7 @@ const routerExtension = (pi: ExtensionAPI) => {
   // Only set when not already initialized: if extensions share instances across
   // parent/subagent sessions, always overwriting would replace the parent's valid
   // registry with the subagent's — which goes stale when the subagent ends.
-  const ensureInitializedFromContext = (ctx: ExtensionContext) => {
+  const ensureInitializedFromContext = (ctx: TCtx) => {
     if (!currentModelRegistry) {
       currentModelRegistry = ctx.modelRegistry;
       lastExtensionContext = ctx;

@@ -3,3 +3,4 @@
 node_modules
 router-debug.log
 docs/plans/
+.DS_Store

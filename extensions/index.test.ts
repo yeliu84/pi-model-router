@@ -1,4 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Api, Model } from '@earendil-works/pi-ai';
+import type {
+  CustomSessionEntry,
+  RouterExtensionAPI,
+  RouterModelSelectEvent,
+  RouterThinkingLevelSelectEvent,
+} from './types';
 import routerExtension from './index';
 
 vi.mock('./config', () => ({
@@ -14,7 +21,7 @@ vi.mock('./config', () => ({
     warnings: [],
   }),
   profileNames: () => ['balanced'],
-  resolveProfileName: (config: unknown, name: unknown) =>
+  resolveProfileName: (_config: unknown, name: unknown) =>
     name === 'balanced' ? 'balanced' : undefined,
   parseCanonicalModelRef: (_ref: string) => ({
     provider: 'openai',
@@ -23,7 +30,7 @@ vi.mock('./config', () => ({
   resolveContextWindow: () => 100000,
   resolveMaxTokens: () => 4000,
   collectProfileThinkingLevels: () => new Set<string>(),
-  getUnsupportedTiers: () => [] as string[],
+  getUnsupportedTiers: (): string[] => [],
   ROUTER_TIERS: ['high', 'medium', 'low'] as const,
   ROUTER_PIN_VALUES: ['auto', 'high', 'medium', 'low'] as const,
   THINKING_LEVELS: [
@@ -37,44 +44,98 @@ vi.mock('./config', () => ({
   isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
 }));
 
+const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
+  id: 'balanced',
+  name: 'Balanced',
+  api: 'openai-completions',
+  provider: 'router',
+  baseUrl: 'https://router.local',
+  input: ['text', 'image'],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  reasoning: true,
+  contextWindow: 100000,
+  maxTokens: 4000,
+  ...overrides,
+});
+
+const buildMockCtx = () => ({
+  cwd: '/mock/cwd',
+  modelRegistry: {
+    find: vi
+      .fn<
+        (provider: string, modelId: string) => Model<Api> | undefined
+      >()
+      .mockReturnValue(createTestModel({ provider: 'router', id: 'balanced' })),
+    getApiKeyAndHeaders: async () => ({
+      ok: true as const,
+      apiKey: 'key',
+      headers: {},
+    }),
+  },
+  model: {
+    provider: 'router',
+    id: 'balanced',
+  } as RouterModelSelectEvent['model'] | undefined,
+  sessionManager: {
+    getBranch: (): CustomSessionEntry[] => [],
+  },
+  ui: {
+    setStatus: vi.fn((_key: string, _text: string | undefined) => {}),
+    setWidget: vi.fn((_key: string, _content: string[] | undefined) => {}),
+    setHiddenThinkingLabel: vi.fn((_label?: string) => {}),
+    theme: { fg: (_c: 'dim', text: string) => text },
+    notify: vi.fn(
+      (_message: string, _type?: 'info' | 'warning' | 'error') => {},
+    ),
+  },
+});
+
+type MockCtx = ReturnType<typeof buildMockCtx>;
+
+type FullRouterEvent = RouterModelSelectEvent & RouterThinkingLevelSelectEvent;
+
+type RegisteredHandler = (
+  event: FullRouterEvent,
+  ctx: MockCtx,
+) => Promise<void> | void;
+
+type TriggerHandler = (
+  event: Partial<FullRouterEvent>,
+  ctx: MockCtx,
+) => Promise<void> | void;
+
+const createMockPi = (
+  eventListeners: Record<string, TriggerHandler[]>,
+) => ({
+  registerProvider: vi.fn(() => {}),
+  registerCommand: vi.fn(() => {}),
+  setModel: vi.fn(async () => true),
+  setThinkingLevel: vi.fn(() => {}),
+  appendEntry: vi.fn(() => {}),
+  on: vi.fn((event: string, handler: RegisteredHandler) => {
+    if (!eventListeners[event]) {
+      eventListeners[event] = [];
+    }
+    eventListeners[event].push((partialEvent, ctx) =>
+      handler(
+        {
+          model: { provider: 'router', id: 'balanced' },
+          level: 'off',
+          ...partialEvent,
+        },
+        ctx,
+      ),
+    );
+  }),
+});
+
 describe('index.ts (orchestrator)', () => {
-  let mockPi: any;
-  let eventListeners: Record<string, Function[]> = {};
+  let mockPi: ReturnType<typeof createMockPi> & RouterExtensionAPI<MockCtx>;
+  let eventListeners: Record<string, TriggerHandler[]> = {};
 
   beforeEach(() => {
     eventListeners = {};
-    mockPi = {
-      registerProvider: vi.fn(),
-      registerCommand: vi.fn(),
-      setModel: vi.fn().mockResolvedValue(true),
-      setThinkingLevel: vi.fn(),
-      appendEntry: vi.fn(),
-      on: vi.fn().mockImplementation((event: string, handler: Function) => {
-        if (!eventListeners[event]) {
-          eventListeners[event] = [];
-        }
-        eventListeners[event].push(handler);
-      }),
-    };
-  });
-
-  const buildMockCtx = () => ({
-    cwd: '/mock/cwd',
-    modelRegistry: {
-      find: vi.fn().mockReturnValue({ provider: 'router', id: 'balanced' }),
-      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: 'key' }),
-    },
-    model: { provider: 'router', id: 'balanced' },
-    sessionManager: {
-      getBranch: () => [] as unknown[],
-    },
-    ui: {
-      setStatus: vi.fn(),
-      setWidget: vi.fn(),
-      setHiddenThinkingLabel: vi.fn(),
-      theme: { fg: (c: string, text: string) => text },
-      notify: vi.fn(),
-    },
+    mockPi = createMockPi(eventListeners);
   });
 
   it('should initialize and register commands, provider, and event hooks', () => {

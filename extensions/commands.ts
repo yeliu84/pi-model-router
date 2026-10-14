@@ -1,6 +1,6 @@
 import type {
   ExtensionAPI,
-  ExtensionContext,
+  ExtensionCommandContext,
 } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
@@ -10,6 +10,7 @@ import type {
   RouterThinkingByProfile,
   RoutingDecision,
   RouterTier,
+  RouterCommandContext,
 } from './types';
 import {
   profileNames,
@@ -26,8 +27,22 @@ import {
   formatDecision,
 } from './ui';
 
-export const registerCommands = (
-  pi: ExtensionAPI,
+export const registerCommands = <
+  TCtx extends RouterCommandContext = ExtensionCommandContext,
+>(
+  pi: {
+    registerCommand: (
+      name: string,
+      options: {
+        description?: string;
+        getArgumentCompletions?: (
+          argumentPrefix: string,
+        ) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
+        handler: (args: string, ctx: TCtx) => Promise<void>;
+      },
+    ) => void;
+    setModel: ExtensionAPI['setModel'];
+  },
   state: {
     readonly currentConfig: RouterConfig;
     routerEnabled: boolean;
@@ -44,15 +59,15 @@ export const registerCommands = (
   },
   actions: {
     persistState: () => void;
-    updateStatus: (ctx: ExtensionContext) => void;
+    updateStatus: (ctx: TCtx) => void;
     reloadConfig: (
-      ctx?: ExtensionContext,
+      ctx?: TCtx,
       options?: { preserveDebug?: boolean },
     ) => void;
-    ensureValidActiveRouterProfile: (ctx: ExtensionContext) => Promise<void>;
+    ensureValidActiveRouterProfile: (ctx: TCtx) => Promise<void>;
     switchToRouterProfile: (
       profileName: string,
-      ctx: ExtensionContext,
+      ctx: TCtx,
       strict?: boolean,
     ) => Promise<boolean>;
     syncPiThinkingLevel: (level: ThinkingLevel) => void;
@@ -156,7 +171,7 @@ export const registerCommands = (
   };
 
 
-  const handleStatus = async (args: string[], ctx: ExtensionContext) => {
+  const handleStatus = async (args: string[], ctx: TCtx) => {
     if (args.length > 0) {
       ctx.ui.notify('Usage: /router status (no arguments)', 'error');
       return;
@@ -199,7 +214,7 @@ export const registerCommands = (
     actions.updateStatus(ctx);
   };
 
-  const handleProfile = async (args: string[], ctx: ExtensionContext) => {
+  const handleProfile = async (args: string[], ctx: TCtx) => {
     if (args.length > 1) {
       ctx.ui.notify('Usage: /router profile [name]', 'error');
       return;
@@ -221,7 +236,7 @@ export const registerCommands = (
     }
   };
 
-  const handlePin = async (args: string[], ctx: ExtensionContext) => {
+  const handlePin = async (args: string[], ctx: TCtx) => {
     const currentProfile = state.selectedProfile;
     if (!currentProfile) {
       ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
@@ -250,7 +265,7 @@ export const registerCommands = (
 
     const pinValue = args[0];
 
-    if (!ROUTER_PIN_VALUES.includes(pinValue as any)) {
+    if (!ROUTER_PIN_VALUES.includes(pinValue as (typeof ROUTER_PIN_VALUES)[number])) {
       ctx.ui.notify(
         `Invalid router pin: ${pinValue}. Use one of: ${ROUTER_PIN_VALUES.join(', ')}`,
         'error',
@@ -274,7 +289,7 @@ export const registerCommands = (
     );
   };
 
-  const handleThinking = async (args: string[], ctx: ExtensionContext) => {
+  const handleThinking = async (args: string[], ctx: TCtx) => {
     const currentProfile = state.selectedProfile;
     if (!currentProfile) {
       ctx.ui.notify('No router profile is active. Select a router model first.', 'error');
@@ -336,7 +351,8 @@ export const registerCommands = (
       return;
     }
 
-    const nextLevel = levelValue === 'auto' ? undefined : (levelValue as any);
+    const nextLevel =
+      levelValue === 'auto' ? undefined : (levelValue as ThinkingLevel);
     if (tier === 'all') {
       for (const t of ROUTER_TIERS) {
         if (!state.thinkingByProfile[currentProfile])
@@ -381,7 +397,7 @@ export const registerCommands = (
     }
   };
 
-  const handleDisable = async (args: string[], ctx: ExtensionContext) => {
+  const handleDisable = async (args: string[], ctx: TCtx) => {
     if (args.length > 0) {
       ctx.ui.notify('Usage: /router disable (no arguments)', 'error');
       return;
@@ -418,7 +434,7 @@ export const registerCommands = (
     );
   };
 
-  const handleFix = async (args: string[], ctx: ExtensionContext) => {
+  const handleFix = async (args: string[], ctx: TCtx) => {
     if (args.length !== 1) {
       ctx.ui.notify('Usage: /router fix <high|medium|low>', 'error');
       return;
@@ -441,7 +457,7 @@ export const registerCommands = (
     );
   };
 
-  const handleWidget = async (args: string[], ctx: ExtensionContext) => {
+  const handleWidget = async (args: string[], ctx: TCtx) => {
     if (args.length > 1) {
       ctx.ui.notify('Usage: /router widget <on|off|toggle>', 'error');
       return;
@@ -458,7 +474,7 @@ export const registerCommands = (
     );
   };
 
-  const handleDebug = async (args: string[], ctx: ExtensionContext) => {
+  const handleDebug = async (args: string[], ctx: TCtx) => {
     if (args.length > 1) {
       ctx.ui.notify('Usage: /router debug <on|off|show|clear>', 'error');
       return;
@@ -490,7 +506,7 @@ export const registerCommands = (
     );
   };
 
-  const handleReload = async (args: string[], ctx: ExtensionContext) => {
+  const handleReload = async (args: string[], ctx: TCtx) => {
     if (args.length > 0) {
       ctx.ui.notify('Usage: /router reload (no arguments)', 'error');
       return;

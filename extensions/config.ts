@@ -12,8 +12,8 @@ import type {
   RoutingRule,
   ModelDefinition,
   ClassifierConfig,
+  RouterModelCapabilityLookup,
 } from './types';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
@@ -52,7 +52,7 @@ export const parseConfigFile = (path: string): ParsedConfigFile => {
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
     if (!isObjectRecord(parsed)) {
       return {
         config: {},
@@ -302,7 +302,7 @@ export const normalizeTierConfig = (
   // Validate tier-level thinkingLevels array
   let tierThinkingLevels: ThinkingLevel[] | undefined;
   if (Array.isArray(value.thinkingLevels)) {
-    tierThinkingLevels = (value.thinkingLevels as unknown[]).filter(
+    tierThinkingLevels = value.thinkingLevels.filter(
       (l): l is ThinkingLevel => isThinkingLevel(l),
     );
     if (tierThinkingLevels.length === 0) tierThinkingLevels = undefined;
@@ -334,35 +334,37 @@ export const normalizeTierConfig = (
   };
 };
 
-export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
+export const normalizeConfig = (
+  raw: RouterConfig | Record<string, unknown>,
+): ConfigLoadResult => {
   const warnings: string[] = [];
 
   // Normalize models map first so aliases are available during tier normalization
-  const normalizedModels = normalizeModelsMap(
-    raw.models as Record<string, unknown> | undefined,
-    warnings,
-  );
+  const rawModels = isObjectRecord(raw.models) ? raw.models : undefined;
+  const normalizedModels = normalizeModelsMap(rawModels, warnings);
   const hasModels = Object.keys(normalizedModels).length > 0;
 
   const normalizedProfiles: Record<string, RouterProfile> = {};
+  const rawProfiles = isObjectRecord(raw.profiles) ? raw.profiles : {};
 
-  for (const [name, profile] of Object.entries(raw.profiles ?? {})) {
+  for (const [name, profile] of Object.entries(rawProfiles)) {
+    const profileObj = isObjectRecord(profile) ? profile : undefined;
     const high = normalizeTierConfig(
-      profile?.high,
+      profileObj?.high,
       name,
       'high',
       warnings,
       hasModels ? normalizedModels : undefined,
     );
     const medium = normalizeTierConfig(
-      profile?.medium,
+      profileObj?.medium,
       name,
       'medium',
       warnings,
       hasModels ? normalizedModels : undefined,
     );
     const low = normalizeTierConfig(
-      profile?.low,
+      profileObj?.low,
       name,
       'low',
       warnings,
@@ -415,7 +417,7 @@ export const normalizeConfig = (raw: RouterConfig): ConfigLoadResult => {
 
   // Resolve classifierModel — accepts string or { model, thinking } object
   let classifierModel: ClassifierConfig | undefined;
-  const rawClassifier = raw.classifierModel as unknown;
+  const rawClassifier: unknown = raw.classifierModel;
   if (typeof rawClassifier === 'string' && rawClassifier.trim()) {
     const resolved = resolveModelRef(
       rawClassifier.trim(),
@@ -515,7 +517,7 @@ export const resolveProfileName = (
 export const resolveContextWindow = (
   tier: RouterTier,
   profile: RouterProfile,
-  modelRegistry: ExtensionContext['modelRegistry'] | undefined,
+  modelRegistry: RouterModelCapabilityLookup | undefined,
 ): number => {
   const tierConfig = profile[tier];
   if (!tierConfig) return DEFAULT_CONTEXT_WINDOW;
@@ -542,7 +544,7 @@ export const resolveContextWindow = (
 export const resolveMaxTokens = (
   tier: RouterTier,
   profile: RouterProfile,
-  modelRegistry: ExtensionContext['modelRegistry'] | undefined,
+  modelRegistry: RouterModelCapabilityLookup | undefined,
 ): number => {
   const tierConfig = profile[tier];
   if (!tierConfig) return DEFAULT_MAX_TOKENS;

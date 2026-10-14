@@ -7,7 +7,6 @@ import {
   updateStatus,
 } from './ui';
 import type { RoutingDecision, RouterConfig } from './types';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 
 describe('ui.ts', () => {
   describe('formatDecision', () => {
@@ -74,8 +73,8 @@ describe('ui.ts', () => {
 
     const buildMockCtx = () => ({
       ui: {
-        setStatus: vi.fn(),
-        setWidget: vi.fn(),
+        setStatus: vi.fn<(key: string, text: string | undefined) => void>(),
+        setWidget: vi.fn<(key: string, content: string[] | undefined) => void>(),
         theme: mockTheme,
       },
     });
@@ -86,7 +85,7 @@ describe('ui.ts', () => {
     };
 
     it('should remove status if disabled', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       updateStatus(
         ctx,
         false,
@@ -105,7 +104,7 @@ describe('ui.ts', () => {
     });
 
     it('should update status to waiting if router is enabled but no last decision matches', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       updateStatus(
         ctx,
         true,
@@ -126,7 +125,7 @@ describe('ui.ts', () => {
     });
 
     it('should display last routed decision information when active profile matches', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       const decision: RoutingDecision = {
         profile: 'balanced',
         tier: 'high',
@@ -174,7 +173,7 @@ describe('ui.ts', () => {
     });
 
     it('should display fallback model when router is disabled and lastNonRouterModel is set', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       updateStatus(
         ctx,
         false,
@@ -201,7 +200,7 @@ describe('ui.ts', () => {
     });
 
     it('should show pins line when multiple profiles have pins', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       const decision: RoutingDecision = {
         profile: 'balanced',
         tier: 'medium',
@@ -235,7 +234,7 @@ describe('ui.ts', () => {
     });
 
     it('should show waiting when active profile does not match lastDecision profile', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       const decision: RoutingDecision = {
         profile: 'other-profile',
         tier: 'high',
@@ -268,7 +267,7 @@ describe('ui.ts', () => {
     });
 
     it('should omit budget denominator from widget when maxSessionBudget is undefined', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       const noBudgetConfig: RouterConfig = {
         profiles: {},
       };
@@ -297,13 +296,14 @@ describe('ui.ts', () => {
         noBudgetConfig,
       );
 
-      const widgetLines = vi.mocked(ctx.ui.setWidget).mock.calls[0][1] as unknown as string[];
-      const costLine = widgetLines.find((l: string) => l.includes('Cost'));
+      const widgetLines = vi.mocked(ctx.ui.setWidget).mock.calls[0][1];
+      expect(widgetLines).toBeDefined();
+      const costLine = widgetLines!.find((l) => l.includes('Cost'));
       expect(costLine).toBe('[dim]Cost: $0.5000[/dim]');
     });
 
     it('should omit budget denominator when maxSessionBudget is 0 (falsy)', () => {
-      const ctx = buildMockCtx() as unknown as ExtensionContext;
+      const ctx = buildMockCtx();
       const zeroBudgetConfig: RouterConfig = {
         maxSessionBudget: 0,
         profiles: {},
@@ -333,8 +333,9 @@ describe('ui.ts', () => {
         zeroBudgetConfig,
       );
 
-      const widgetLines = vi.mocked(ctx.ui.setWidget).mock.calls[0][1] as unknown as string[];
-      const costLine = widgetLines.find((l: string) => l.includes('Cost'));
+      const widgetLines = vi.mocked(ctx.ui.setWidget).mock.calls[0][1];
+      expect(widgetLines).toBeDefined();
+      const costLine = widgetLines!.find((l) => l.includes('Cost'));
       // maxSessionBudget=0 is falsy, so no denominator is shown
       expect(costLine).toBe('[dim]Cost: $0.0000[/dim]');
     });

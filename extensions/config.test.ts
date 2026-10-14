@@ -18,7 +18,13 @@ import {
   isThinkingLevel,
   isRouterTier,
 } from './config';
-import type { RouterConfig, RouterProfile, ModelDefinition, RoutedTierConfig } from './types';
+import type {
+  RouterConfig,
+  RouterProfile,
+  ModelDefinition,
+  RoutedTierConfig,
+  RouterModelCapabilityLookup,
+} from './types';
 
 vi.mock('@earendil-works/pi-coding-agent', () => ({
   getAgentDir: () => '/mock/agent/dir',
@@ -204,16 +210,13 @@ describe('config.ts', () => {
   describe('normalizeModelsMap', () => {
     it('should extract valid models and log warnings', () => {
       const warnings: string[] = [];
-      const raw = {
+      const raw: Record<string, unknown> = {
         valid: { model: 'openai/gpt-4o', contextWindow: 100000 },
         invalidType: 'not-an-object',
         missingModel: { contextWindow: 100 },
         invalidRef: { model: 'gpt4' },
       };
-      const result = normalizeModelsMap(
-        raw as unknown as Record<string, unknown>,
-        warnings,
-      );
+      const result = normalizeModelsMap(raw, warnings);
       expect(result.valid).toEqual({
         model: 'openai/gpt-4o',
         contextWindow: 100000,
@@ -284,9 +287,7 @@ describe('config.ts', () => {
         },
       };
 
-      const { config, warnings } = normalizeConfig(
-        raw as unknown as RouterConfig,
-      );
+      const { config, warnings } = normalizeConfig(raw);
       expect(warnings).toEqual([]);
       expect(config.debug).toBe(true);
       expect(config.phaseBias).toBe(0.8);
@@ -352,22 +353,18 @@ describe('config.ts', () => {
       },
     };
 
-    const mockRegistry = {
+    const mockRegistry: RouterModelCapabilityLookup = {
       find: (provider: string, modelId: string) => {
         if (provider === 'openai' && modelId === 'gpt-4o') {
-          return { contextWindow: 99999, maxTokens: 8888 } as any;
+          return { contextWindow: 99999, maxTokens: 8888 };
         }
         return undefined;
       },
-      getApiKeyAndHeaders: async () => ({
-        ok: false as const,
-        error: 'not-mocked',
-      }),
     };
 
     it('should resolve using registry if available', () => {
-      const cw = resolveContextWindow('high', profile, mockRegistry as any);
-      const mot = resolveMaxTokens('high', profile, mockRegistry as any);
+      const cw = resolveContextWindow('high', profile, mockRegistry);
+      const mot = resolveMaxTokens('high', profile, mockRegistry);
       expect(cw).toBe(99999);
       expect(mot).toBe(8888);
     });
@@ -393,25 +390,23 @@ describe('config.ts', () => {
       const profile: RouterProfile = {
         high: { model: 'openai/gpt-4o', resolvedContextWindow: 60000, resolvedMaxTokens: 4000 },
       };
-      const registryNoValues = {
+      const registryNoValues: RouterModelCapabilityLookup = {
         find: () => ({}),
-        getApiKeyAndHeaders: async () => ({ ok: false as const, error: 'not-mocked' }),
       };
-      expect(resolveContextWindow('high', profile, registryNoValues as any)).toBe(60000);
-      expect(resolveMaxTokens('high', profile, registryNoValues as any)).toBe(4000);
+      expect(resolveContextWindow('high', profile, registryNoValues)).toBe(60000);
+      expect(resolveMaxTokens('high', profile, registryNoValues)).toBe(4000);
     });
 
     it('should catch parseCanonicalModelRef errors and return resolved values', () => {
       const profile: RouterProfile = {
         high: { model: 'invalid-no-slash', resolvedContextWindow: 50000, resolvedMaxTokens: 3000 },
       };
-      const registryWithFind = {
+      const registryWithFind: RouterModelCapabilityLookup = {
         find: () => ({ contextWindow: 99999, maxTokens: 8888 }),
-        getApiKeyAndHeaders: async () => ({ ok: false as const, error: 'not-mocked' }),
       };
       // parseCanonicalModelRef will throw for 'invalid-no-slash', so it falls through to resolved values
-      expect(resolveContextWindow('high', profile, registryWithFind as any)).toBe(50000);
-      expect(resolveMaxTokens('high', profile, registryWithFind as any)).toBe(3000);
+      expect(resolveContextWindow('high', profile, registryWithFind)).toBe(50000);
+      expect(resolveMaxTokens('high', profile, registryWithFind)).toBe(3000);
     });
   });
 
@@ -492,7 +487,7 @@ describe('config.ts', () => {
         },
         classifierModel: { model: 'openai/gpt-4o', thinking: 'low' },
       };
-      const { config, warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      const { config, warnings } = normalizeConfig(raw);
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');
       expect(config.classifierModel?.thinking).toBe('low');
       expect(warnings).toEqual([]);
@@ -505,7 +500,7 @@ describe('config.ts', () => {
         },
         classifierModel: { model: 'openai/gpt-4o', thinking: 'super-invalid' },
       };
-      const { config, warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      const { config, warnings } = normalizeConfig(raw);
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');
       expect(config.classifierModel?.thinking).toBeUndefined();
       expect(warnings.length).toBe(1);
@@ -519,7 +514,7 @@ describe('config.ts', () => {
         },
         classifierModel: { thinking: 'high' },
       };
-      const { config, warnings } = normalizeConfig(raw as unknown as RouterConfig);
+      const { config, warnings } = normalizeConfig(raw);
       expect(config.classifierModel).toBeUndefined();
       expect(warnings.length).toBe(1);
       expect(warnings[0]).toContain('missing the "model" field');

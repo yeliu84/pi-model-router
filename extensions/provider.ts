@@ -20,6 +20,8 @@ import type {
   RouterTier,
   RouterPinByProfile,
   RouterThinkingByProfile,
+  RouterModelRegistry,
+  RouterModelCapabilityLookup,
 } from './types';
 import {
   profileNames,
@@ -28,9 +30,16 @@ import {
   resolveContextWindow,
   resolveMaxTokens,
   collectProfileThinkingLevels,
-  THINKING_LEVELS,
   clampThinkingLevel,
 } from './config';
+import {
+  phaseForTier,
+  buildRoutingDecision,
+  decideRouting,
+  runClassifier,
+  extractMessageText,
+  hasImageAttachment,
+} from './routing';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 const REGISTRY_WAIT_TIMEOUT_MS = 5000;
 const REGISTRY_WAIT_INITIAL_DELAY_MS = 50;
@@ -41,14 +50,12 @@ const REGISTRY_WAIT_MAX_DELAY_MS = 500;
  * This handles the race condition where subagents (e.g. from pi-dynamic-workflows)
  * invoke the router provider before session_start has fired in their context.
  */
-export const waitForRegistry = async (
+export const waitForRegistry = async <TRegistry = RouterModelRegistry>(
   state: {
-    readonly currentModelRegistry:
-      | ExtensionContext['modelRegistry']
-      | undefined;
+    readonly currentModelRegistry: TRegistry | undefined;
   },
   timeoutMs: number = REGISTRY_WAIT_TIMEOUT_MS,
-): Promise<ExtensionContext['modelRegistry'] | undefined> => {
+): Promise<TRegistry | undefined> => {
   if (state.currentModelRegistry) return state.currentModelRegistry;
 
   const start = Date.now();
@@ -60,15 +67,6 @@ export const waitForRegistry = async (
   }
   return undefined;
 };
-
-import {
-  phaseForTier,
-  buildRoutingDecision,
-  decideRouting,
-  runClassifier,
-  extractTextFromContent,
-  hasImageAttachment,
-} from './routing';
 
 export const createErrorMessage = (
   model: Model<Api>,
@@ -105,41 +103,44 @@ const estimateTokens = (text: string): number => Math.ceil(text.length / 3);
  */
 const truncateContext = (context: Context, limit: number): Context => {
   const messages = [...context.messages];
-  if (messages.length <= 1) return context;
+  const nonSystemIndices = messages.reduce<number[]>((acc, m, idx) => {
+    if (m.role !== 'system') acc.push(idx);
+    return acc;
+  }, []);
+  if (nonSystemIndices.length <= 1) return context;
 
-  const systemTokens = context.systemPrompt ? estimateTokens(context.systemPrompt) : 0;
+  const systemPromptTokens = context.systemPrompt
+    ? estimateTokens(context.systemPrompt)
+    : 0;
 
-  // Pre-calculate token sizes
+  // Pre-calculate token sizes (including sections on SystemMessage in TranscriptContext)
   const messageTokens = messages.map((m) =>
-    estimateTokens(extractTextFromContent(m.content)),
+    estimateTokens(extractMessageText(m)),
   );
-  const totalTokens = systemTokens + messageTokens.reduce((sum, t) => sum + t, 0);
+  let currentTokens =
+    systemPromptTokens + messageTokens.reduce((sum, t) => sum + t, 0);
 
-  if (totalTokens <= limit) return context;
+  if (currentTokens <= limit) return context;
 
-  const latestMessage = messages.pop();
-  if (!latestMessage) return context;
-  const latestTokens = messageTokens.pop() ?? 0;
+  const lastNonSystemIndex = nonSystemIndices[nonSystemIndices.length - 1];
+  const droppedIndices = new Set<number>();
 
-  // Keep shifting oldest messages from the start of the list
-  let activeMessagesTokensSum = messageTokens.reduce((sum, t) => sum + t, 0);
-
-  let startIndex = 0;
-  while (startIndex < messages.length) {
-    const currentTokens = systemTokens + latestTokens + activeMessagesTokensSum;
-    if (currentTokens <= limit) break;
-
-    activeMessagesTokensSum -= messageTokens[startIndex];
-    startIndex++;
+  // Drop oldest non-system messages while preserving all system messages and the latest message
+  for (const idx of nonSystemIndices) {
+    if (idx === lastNonSystemIndex || currentTokens <= limit) break;
+    currentTokens -= messageTokens[idx];
+    droppedIndices.add(idx);
   }
 
-  const finalMessages = [...messages.slice(startIndex), latestMessage];
+  const finalMessages: Message[] = messages.filter(
+    (_, idx) => !droppedIndices.has(idx),
+  );
   return { ...context, messages: finalMessages };
 };
 
 const supportsReasoning = (
   profile: RouterConfig['profiles'][string],
-  modelRegistry: ExtensionContext['modelRegistry'] | undefined,
+  modelRegistry: RouterModelCapabilityLookup | undefined,
 ): boolean => {
   if (!modelRegistry) return false;
 
@@ -159,15 +160,17 @@ const supportsReasoning = (
   return false;
 };
 
-export const registerRouterProvider = (
-  pi: ExtensionAPI,
+export const registerRouterProvider = <
+  TContext extends {
+    ui: { setHiddenThinkingLabel?: (label?: string) => void };
+  } = ExtensionContext,
+>(
+  pi: Pick<ExtensionAPI, 'registerProvider'>,
   state: {
     lastRegisteredModels: string;
     readonly currentConfig: RouterConfig;
-    readonly currentModelRegistry:
-      | ExtensionContext['modelRegistry']
-      | undefined;
-    readonly lastExtensionContext: ExtensionContext | undefined;
+    readonly currentModelRegistry: RouterModelRegistry | undefined;
+    readonly lastExtensionContext: TContext | undefined;
     selectedProfile: string | undefined;
     routerEnabled: boolean;
     lastDecision: RoutingDecision | undefined;
@@ -180,8 +183,11 @@ export const registerRouterProvider = (
   actions: {
     persistState: () => void;
     recordDebugDecision: (decision: RoutingDecision) => void;
-    getThinkingOverride: (profileName: string, tier: RouterTier) => ThinkingLevel | undefined;
-    updateStatus: (ctx: ExtensionContext) => void;
+    getThinkingOverride: (
+      profileName: string,
+      tier: RouterTier,
+    ) => ThinkingLevel | undefined;
+    updateStatus: (ctx: TContext) => void;
     syncPiThinkingLevel: (level: ThinkingLevel) => void;
   },
 ) => {
@@ -246,11 +252,11 @@ export const registerRouterProvider = (
     apiKey: 'pi-model-router',
     api: 'router-local-api',
     models: modelDefinitions,
-    streamSimple(
+    streamSimple: (
       model: Model<Api>,
       context: Context,
       options?: SimpleStreamOptions,
-    ): AssistantMessageEventStream {
+    ): AssistantMessageEventStream => {
       const stream = createAssistantMessageEventStream();
 
       (async () => {
@@ -317,7 +323,9 @@ export const registerRouterProvider = (
             }
           }
 
-          const lastMessage = context.messages[context.messages.length - 1];
+          const lastMessage = context.messages.findLast(
+            (m) => m.role !== 'system',
+          );
           const previousDecision = state.lastDecision;
           const isGoogleThinkingToolContinuation =
             lastMessage?.role === 'toolResult' &&
@@ -509,13 +517,18 @@ export const registerRouterProvider = (
               const { reasoning: _piReasoning, ...delegationOptions } =
                 options ?? {};
 
+              const effectiveTargetModel = auth.baseUrl
+                ? { ...targetModel, baseUrl: auth.baseUrl }
+                : targetModel;
+
               const delegatedStream = streamSimple(
-                targetModel,
+                effectiveTargetModel,
                 effectiveContext,
                 {
                   ...delegationOptions,
                   apiKey,
                   headers,
+                  ...(auth.env ? { env: auth.env } : {}),
                   ...(delegatedReasoning
                     ? { reasoning: delegatedReasoning }
                     : {}),

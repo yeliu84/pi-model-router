@@ -11,7 +11,7 @@ export const isRouterPersistedState = (
   if (typeof value !== 'object' || value === null) {
     return false;
   }
-  const v = value as any;
+  const v = value as Record<string, unknown>;
   return (
     typeof v.enabled === 'boolean' &&
     typeof v.selectedProfile === 'string' &&

@@ -1,9 +1,9 @@
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type {
   RoutingDecision,
   RouterConfig,
   RouterPinByProfile,
   RouterThinkingByProfile,
+  RouterUIContext,
 } from './types';
 
 const getEffectiveThinking = (
@@ -52,7 +52,7 @@ export const formatModelRef = (ref: string | undefined): string => {
 };
 
 export const updateStatus = (
-  ctx: ExtensionContext,
+  ctx: RouterUIContext,
   routerEnabled: boolean,
   selectedProfile: string | undefined,
   pinnedTierByProfile: RouterPinByProfile,

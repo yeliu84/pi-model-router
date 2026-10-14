@@ -1,7 +1,6 @@
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type { Context, Message } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type {
   RouterTier,
   RouterPhase,
@@ -9,6 +8,7 @@ import type {
   RoutingDecision,
   RoutingRule,
   RouterThinkingByTier,
+  RouterModelRegistry,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier } from './config';
 
@@ -30,6 +30,19 @@ export const extractTextFromContent = (
     .join('\n');
 };
 
+export const extractMessageText = (message: Message): string => {
+  const baseText = extractTextFromContent(message.content);
+  if (message.role !== 'system' || !message.sections) {
+    return baseText;
+  }
+  const sectionText = Object.values(message.sections)
+    .filter(
+      (value): value is string => typeof value === 'string' && value.length > 0,
+    )
+    .join('\n\n');
+  return [baseText, sectionText].filter(Boolean).join('\n\n');
+};
+
 export const getLastUserText = (context: Context): string => {
   for (let i = context.messages.length - 1; i >= 0; i--) {
     const message = context.messages[i];
@@ -45,6 +58,7 @@ export const getRecentConversationText = (
   limit = 6,
 ): string => {
   return context.messages
+    .filter((message) => message.role !== 'system')
     .slice(-limit)
     .map((message) => extractTextFromContent(message.content).trim())
     .filter(Boolean)
@@ -388,7 +402,7 @@ export const decideRouting = (
 
 export const runClassifier = async (
   classifierModelRef: string,
-  modelRegistry: ExtensionContext['modelRegistry'],
+  modelRegistry: RouterModelRegistry,
   context: Context,
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
@@ -428,7 +442,6 @@ ${currentPhase === 'planning' ? 'Consider that the conversation is currently in 
 ${currentPhase === 'implementation' ? 'Consider that the conversation is currently in an implementation phase. Bias toward "medium" unless the request is clearly planning or a simple summary.' : ''}`;
 
     const classifierContext: Context = {
-      ...context,
       messages: [{ role: 'user', content: classifierPrompt, timestamp: Date.now() }],
     };
 
@@ -437,18 +450,20 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
         ? thinking
         : undefined;
 
-    const stream = streamSimple(model, classifierContext, {
+    const effectiveModel = auth.baseUrl
+      ? { ...model, baseUrl: auth.baseUrl }
+      : model;
+
+    const stream = streamSimple(effectiveModel, classifierContext, {
       apiKey,
       headers,
+      ...(auth.env ? { env: auth.env } : {}),
       ...(reasoningOption ? { reasoning: reasoningOption } : {}),
     });
     let fullText = '';
     for await (const event of stream) {
-      if (
-        event.type === 'text_delta' &&
-        typeof (event as any).delta === 'string'
-      ) {
-        fullText += (event as any).delta;
+      if (event.type === 'text_delta') {
+        fullText += event.delta;
       }
     }
 

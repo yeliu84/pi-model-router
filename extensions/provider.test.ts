@@ -1,68 +1,130 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { registerRouterProvider, createErrorMessage, waitForRegistry } from './provider';
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import {
+  registerRouterProvider,
+  createErrorMessage,
+  waitForRegistry,
+} from './provider';
+import {
+  createAssistantMessageEventStream,
+  normalizeContext,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  type Context,
+  type Model,
+  type Provider,
+} from '@earendil-works/pi-ai';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
-import type { Api, Context, Model, AssistantMessageEventStream, SimpleStreamOptions } from '@earendil-works/pi-ai';
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ProviderConfig,
+} from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { RouterConfig, RoutingDecision, RouterTier } from './types';
-
-interface MockEvent {
-  type: string;
-  delta?: string;
-  error?: { errorMessage?: string };
-  message?: { usage?: { cost?: { total: number } } };
-}
-
-class MockEventStream {
-  events: MockEvent[] = [];
-
-  push(event: MockEvent) {
-    this.events.push(event);
-  }
-
-  end() {}
-}
-
-vi.mock('@earendil-works/pi-ai', () => ({
-  createAssistantMessageEventStream: vi.fn(),
-}));
+import type {
+  RouterConfig,
+  RoutingDecision,
+  RouterModelRegistry,
+  RouterPinByProfile,
+  RouterThinkingByProfile,
+} from './types';
 
 vi.mock('@earendil-works/pi-ai/compat', () => ({
   streamSimple: vi.fn(),
 }));
 
-type ProviderState = Parameters<typeof registerRouterProvider>[1];
-type ProviderActions = Parameters<typeof registerRouterProvider>[2];
-type MutableProviderState = { -readonly [K in keyof ProviderState]: ProviderState[K] };
+const createFailingStream = (
+  errorMessage: string,
+): AssistantMessageEventStream => {
+  const s = createAssistantMessageEventStream();
+  return Object.assign(s, {
+    async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+      throw new Error(errorMessage);
+    },
+  });
+};
 
-interface RegisteredProviderOptions {
-  baseUrl: string;
-  apiKey: string;
-  api: string;
-  models: {
-    id: string;
-    name: string;
-    reasoning: boolean;
-    input: readonly ('text' | 'image')[];
-    cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-    contextWindow: number;
-    maxTokens: number;
-    thinkingLevelMap?: Record<string, string>;
-  }[];
-  streamSimple: (
-    model: Model<Api>,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ) => AssistantMessageEventStream;
+const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
+  id: 'gpt-4o',
+  name: 'GPT-4o',
+  api: 'openai-completions',
+  provider: 'openai',
+  baseUrl: 'https://api.openai.com/v1',
+  input: ['text', 'image'],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  reasoning: false,
+  contextWindow: 128000,
+  maxTokens: 4096,
+  ...overrides,
+});
+
+const createAssistantMsg = (
+  text: string,
+  totalCost = 0,
+): AssistantMessage => ({
+  role: 'assistant',
+  content: [{ type: 'text', text }],
+  api: 'openai-completions',
+  provider: 'openai',
+  model: 'gpt-4o',
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: totalCost,
+    },
+  },
+  stopReason: 'stop',
+  timestamp: Date.now(),
+});
+
+const createDelegateStream = (
+  text: string,
+  totalCost = 0,
+): AssistantMessageEventStream => {
+  const s = createAssistantMessageEventStream();
+  const msg = createAssistantMsg(text, totalCost);
+  s.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: msg });
+  s.push({ type: 'done', reason: 'stop', message: msg });
+  s.end(msg);
+  return s;
+};
+
+interface TestExtensionContext {
+  ui: {
+    setHiddenThinkingLabel: (label?: string) => void;
+  };
+}
+
+interface TestProviderState {
+  lastRegisteredModels: string;
+  currentConfig: RouterConfig;
+  currentModelRegistry: RouterModelRegistry | undefined;
+  lastExtensionContext: TestExtensionContext | undefined;
+  selectedProfile: string | undefined;
+  routerEnabled: boolean;
+  lastDecision: RoutingDecision | undefined;
+  thinkingByProfile: RouterThinkingByProfile;
+  pinnedTierByProfile: RouterPinByProfile;
+  accumulatedCost: number;
+  registryTimeoutMs?: number;
 }
 
 describe('provider.ts', () => {
-  let mockPi: ExtensionAPI;
-  let mockState: MutableProviderState;
-  let mockActions: ProviderActions;
+  let mockPi: Pick<ExtensionAPI, 'registerProvider'>;
+  let mockState: TestProviderState;
+  let mockActions: Parameters<
+    typeof registerRouterProvider<TestExtensionContext>
+  >[2];
   let registeredProviderName: string | null = null;
-  let registeredProviderOptions: RegisteredProviderOptions | null = null;
+  let registeredProviderOptions: ProviderConfig | null = null;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -70,11 +132,16 @@ describe('provider.ts', () => {
     registeredProviderOptions = null;
 
     mockPi = {
-      registerProvider: (name: string, options: Parameters<ExtensionAPI['registerProvider']>[1]) => {
-        registeredProviderName = name;
-        registeredProviderOptions = options as unknown as RegisteredProviderOptions;
+      registerProvider: (
+        nameOrProvider: string | Provider,
+        options?: ProviderConfig,
+      ) => {
+        if (typeof nameOrProvider === 'string' && options) {
+          registeredProviderName = nameOrProvider;
+          registeredProviderOptions = options;
+        }
       },
-    } as unknown as ExtensionAPI;
+    };
 
     const config: RouterConfig = {
       profiles: {
@@ -89,10 +156,15 @@ describe('provider.ts', () => {
       },
     };
 
-    const mockRegistry = {
+    const mockRegistry: RouterModelRegistry = {
       find: (provider: string, modelId: string) => {
         if (provider === 'openai' || provider === 'google') {
-          return { provider, id: modelId, input: ['text', 'image'] as const } as unknown as Model<Api>;
+          return createTestModel({
+            provider,
+            id: modelId,
+            input: ['text', 'image'],
+            contextWindow: modelId === 'gpt-4o-mini' ? 5000 : 10000,
+          });
         }
         return undefined;
       },
@@ -101,7 +173,7 @@ describe('provider.ts', () => {
         apiKey: 'test-key',
         headers: {},
       }),
-    } as unknown as ExtensionContext['modelRegistry'];
+    };
 
     mockState = {
       lastRegisteredModels: '',
@@ -111,7 +183,7 @@ describe('provider.ts', () => {
         ui: {
           setHiddenThinkingLabel: vi.fn(),
         },
-      } as unknown as ExtensionContext,
+      },
       selectedProfile: undefined,
       routerEnabled: false,
       lastDecision: undefined,
@@ -131,7 +203,7 @@ describe('provider.ts', () => {
 
   describe('createErrorMessage', () => {
     it('should create a valid error AssistantMessage', () => {
-      const model = { api: 'openai' as Api, provider: 'openai', id: 'gpt-4o' } as unknown as Model<Api>;
+      const model = createTestModel({ provider: 'openai', id: 'gpt-4o' });
       const msg = createErrorMessage(model, 'Test error message');
       expect(msg.role).toBe('assistant');
       expect(msg.errorMessage).toBe('Test error message');
@@ -144,33 +216,25 @@ describe('provider.ts', () => {
       registerRouterProvider(mockPi, mockState, mockActions);
       expect(registeredProviderName).toBe('router');
       expect(registeredProviderOptions).toBeDefined();
-      expect(registeredProviderOptions!.models[0].id).toBe('balanced');
+      expect(registeredProviderOptions!.models![0].id).toBe('balanced');
     });
 
     it('should delegate streams and accumulate cost on success', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
+
+      vi.mocked(streamSimple).mockReturnValue(
+        createDelegateStream('Answer part', 0.0015),
       );
 
-      const delegateStream = (async function* () {
-        yield { type: 'text_delta', delta: 'Answer part' };
-        yield { type: 'done', message: { usage: { cost: { total: 0.0015 } } } };
-      })();
-      vi.mocked(streamSimple).mockReturnValue(delegateStream as unknown as ReturnType<typeof streamSimple>);
-
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      const providerStream = registeredProviderOptions!.streamSimple(
-        model,
-        context,
-      );
+      registeredProviderOptions!.streamSimple!(model, context);
 
       // Wait for async execution of stream handler
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -183,41 +247,28 @@ describe('provider.ts', () => {
 
     it('should try fallbacks if the primary model fails', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
       let callCount = 0;
-      vi.mocked(streamSimple).mockImplementation(((model: Model<Api>) => {
+      vi.mocked(streamSimple).mockImplementation((model: Model<Api>) => {
         callCount++;
         if (model.id === 'gpt-4o-mini') {
-          // Force fail for primary
-          return (async function* () {
-            throw new Error('primary failed');
-          })() as unknown as ReturnType<typeof streamSimple>;
+          return createFailingStream('primary failed');
         }
-        // Success for fallback
-        return (async function* () {
-          yield { type: 'text_delta', delta: 'fallback answer' };
-          yield {
-            type: 'done',
-            message: { usage: { cost: { total: 0.0005 } } },
-          };
-        })() as unknown as ReturnType<typeof streamSimple>;
-      }));
+        return createDelegateStream('fallback answer', 0.0005);
+      });
 
       // Force a medium tier routing decision
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -228,15 +279,7 @@ describe('provider.ts', () => {
 
     it('should preserve previous Google model on Google thinking tool continuation', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
-      vi.mocked(streamSimple).mockReturnValue(
-        (async function* () {
-          yield { type: 'text_delta', delta: 'done' };
-        })() as unknown as ReturnType<typeof streamSimple>,
-      );
+      vi.mocked(streamSimple).mockReturnValue(createDelegateStream('done'));
 
       // Set up last decision as Google model with thinking
       mockState.lastDecision = {
@@ -265,30 +308,33 @@ describe('provider.ts', () => {
       mockState.currentModelRegistry!.find = (
         provider: string,
         modelId: string,
-      ) => {
-        return { provider, id: modelId, reasoning: true, input: ['text'] as const } as unknown as Model<Api>;
-      };
+      ) =>
+        createTestModel({
+          provider,
+          id: modelId,
+          reasoning: true,
+          input: ['text'],
+        });
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = {
+      });
+      const context = normalizeContext({
         messages: [
           { role: 'user', content: 'initial', timestamp: Date.now() },
           {
             role: 'toolResult',
             toolCallId: 'c1',
             toolName: 't',
-            content: 'tool output',
+            content: [{ type: 'text', text: 'tool output' }],
             isError: false,
             timestamp: Date.now(),
           },
         ],
-      } as unknown as Context;
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -301,15 +347,7 @@ describe('provider.ts', () => {
 
     it('should force higher tier if current tier does not support image attachments', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
-      vi.mocked(streamSimple).mockReturnValue(
-        (async function* () {
-          yield { type: 'text_delta', delta: 'done' };
-        })() as unknown as ReturnType<typeof streamSimple>,
-      );
+      vi.mocked(streamSimple).mockReturnValue(createDelegateStream('done'));
 
       // Define medium tier model and fallback without image support, high tier model with image support
       mockState.currentModelRegistry!.find = (
@@ -317,35 +355,43 @@ describe('provider.ts', () => {
         modelId: string,
       ) => {
         if (modelId === 'gpt-4o') {
-          return { provider, id: modelId, input: ['text', 'image'] as const } as unknown as Model<Api>; // high does support image
+          return createTestModel({
+            provider,
+            id: modelId,
+            input: ['text', 'image'],
+          });
         }
-        return { provider, id: modelId, input: ['text'] as const } as unknown as Model<Api>; // medium and fallback gemini-1.5-flash don't support image
+        return createTestModel({
+          provider,
+          id: modelId,
+          input: ['text'],
+        });
       };
 
       // Force a medium tier routing decision originally
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = {
+      });
+      const context = normalizeContext({
         messages: [
           {
             role: 'user',
             content: [
               {
-                type: 'image' as const,
-                image: { mimeType: 'image/png', data: 'data' },
+                type: 'image',
+                mimeType: 'image/png',
+                data: 'data',
               },
             ],
             timestamp: Date.now(),
           },
         ],
-      } as unknown as Context;
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -358,47 +404,42 @@ describe('provider.ts', () => {
 
     it('should auto-truncate context if target limit is smaller than reported context window', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
       let truncatedContextPassed: Context | null = null;
-      vi.mocked(streamSimple).mockImplementation(((model: Model<Api>, ctx: Context) => {
-        truncatedContextPassed = ctx;
-        return (async function* () {
-          yield { type: 'text_delta', delta: 'done' };
-        })() as unknown as ReturnType<typeof streamSimple>;
-      }));
+      vi.mocked(streamSimple).mockImplementation(
+        (_model: Model<Api>, ctx: Context) => {
+          truncatedContextPassed = ctx;
+          return createDelegateStream('done');
+        },
+      );
 
       // Medium tier model has resolvedContextWindow = 5000 in config.
       // But let's verify if reported max context window of router is larger (which is 10000 from high tier).
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
         contextWindow: 10000,
-      } as unknown as Model<Api>;
+      });
 
       // Let's create a large context that exceeds 5000 tokens (approx 15000 chars)
-      const context = {
+      const context = normalizeContext({
         systemPrompt: 'System prompt instructions',
         messages: [
           { role: 'user', content: 'a'.repeat(8000), timestamp: Date.now() },
           { role: 'user', content: 'b'.repeat(8000), timestamp: Date.now() },
-          { role: 'user', content: 'c'.repeat(2000), timestamp: Date.now() }, // latest message
+          { role: 'user', content: 'c'.repeat(2000), timestamp: Date.now() },
         ],
-      } as unknown as Context;
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       expect(truncatedContextPassed).toBeDefined();
       // Old messages should have been truncated to fit 5000 tokens limit (15000 chars approx)
-      // The first message 'a'.repeat(8000) should have been shifted out.
+      // The first user message 'a'.repeat(8000) should have been dropped while preserving system & latest.
       expect(truncatedContextPassed!.messages.length).toBeLessThan(
         context.messages.length,
       );
@@ -409,42 +450,82 @@ describe('provider.ts', () => {
       ).toBe('c'.repeat(2000));
     });
 
+    it('should preserve system messages in TranscriptContext during auto-truncation', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      let truncatedContextPassed: Context | null = null;
+      vi.mocked(streamSimple).mockImplementation(
+        (_model: Model<Api>, ctx: Context) => {
+          truncatedContextPassed = ctx;
+          return createDelegateStream('done');
+        },
+      );
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      const model = createTestModel({
+        id: 'balanced',
+        provider: 'router',
+        contextWindow: 10000,
+      });
+
+      const context = normalizeContext({
+        messages: [
+          {
+            role: 'system',
+            content: '',
+            sections: { main: 'System prompt instructions' },
+            timestamp: 0,
+          },
+          { role: 'user', content: 'a'.repeat(8000), timestamp: Date.now() },
+          { role: 'user', content: 'b'.repeat(8000), timestamp: Date.now() },
+          { role: 'user', content: 'c'.repeat(2000), timestamp: Date.now() },
+        ],
+      });
+
+      registeredProviderOptions!.streamSimple!(model, context);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(truncatedContextPassed).toBeDefined();
+      expect(truncatedContextPassed!.messages[0].role).toBe('system');
+      expect(truncatedContextPassed!.messages.length).toBe(3);
+      expect(truncatedContextPassed!.messages[1].content).toBe('b'.repeat(8000));
+      expect(truncatedContextPassed!.messages[2].content).toBe('c'.repeat(2000));
+    });
+
     it('should push error event when currentModelRegistry never becomes available', async () => {
       mockState.currentModelRegistry = undefined;
       mockState.registryTimeoutMs = 100; // Use short timeout for test
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      const stream = registeredProviderOptions!.streamSimple!(model, context);
+      const result = await stream.result();
 
-      await vi.waitFor(
-        () => {
-          const errorEvent = stream.events.find((e) => e.type === 'error');
-          expect(errorEvent).toBeDefined();
-          expect(errorEvent?.error?.errorMessage).toContain('timed out');
-        },
-        { timeout: 500 },
-      );
+      expect(result.stopReason).toBe('error');
+      expect(result.errorMessage).toContain('timed out');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
     it('should wait and succeed when currentModelRegistry becomes available after a delay', async () => {
       mockState.currentModelRegistry = undefined;
-      mockState.registryTimeoutMs = 500; // Allow enough time but not too long
-      const mockRegistry = {
+      mockState.registryTimeoutMs = 500;
+      const mockRegistry: RouterModelRegistry = {
         find: (provider: string, modelId: string) => {
           if (provider === 'openai' || provider === 'google') {
-            return { provider, id: modelId, input: ['text', 'image'] as const } as unknown as Model<Api>;
+            return createTestModel({
+              provider,
+              id: modelId,
+              input: ['text', 'image'],
+            });
           }
           return undefined;
         },
@@ -453,28 +534,23 @@ describe('provider.ts', () => {
           apiKey: 'test-key',
           headers: {},
         }),
-      } as unknown as ExtensionContext['modelRegistry'];
+      };
 
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
+
+      vi.mocked(streamSimple).mockReturnValue(
+        createDelegateStream('Answer', 0.001),
       );
 
-      const delegateStream = (async function* () {
-        yield { type: 'text_delta', delta: 'Answer' };
-        yield { type: 'done', message: { usage: { cost: { total: 0.001 } } } };
-      })();
-      vi.mocked(streamSimple).mockReturnValue(delegateStream as unknown as ReturnType<typeof streamSimple>);
-
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       // Simulate session_start setting the registry after 10ms
       setTimeout(() => {
@@ -492,31 +568,28 @@ describe('provider.ts', () => {
 
     it('should push error event when profile is unknown', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
-      const model = {
+      const model = createTestModel({
         id: 'nonexistent-profile',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      const stream = registeredProviderOptions!.streamSimple!(model, context);
+      const result = await stream.result();
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      const errorEvent = stream.events.find((e) => e.type === 'error');
-      expect(errorEvent).toBeDefined();
-      expect(errorEvent?.error?.errorMessage).toContain('Unknown router profile');
+      expect(result.stopReason).toBe('error');
+      expect(result.errorMessage).toContain('Unknown router profile');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
     it('should fall back when auth fails for primary model', async () => {
       let authCallCount = 0;
-      mockState.currentModelRegistry!.getApiKeyAndHeaders = async (model: Model<Api>) => {
+      mockState.currentModelRegistry!.getApiKeyAndHeaders = async (
+        model: Model<Api>,
+      ) => {
         authCallCount++;
         if (model.id === 'gpt-4o-mini') {
           return { ok: false, error: 'auth-error' };
@@ -525,29 +598,23 @@ describe('provider.ts', () => {
       };
 
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
       vi.mocked(streamSimple).mockReturnValue(
-        (async function* () {
-          yield { type: 'text_delta', delta: 'fallback answer' };
-          yield { type: 'done', message: { usage: { cost: { total: 0.001 } } } };
-        })() as unknown as ReturnType<typeof streamSimple>,
+        createDelegateStream('fallback answer', 0.001),
       );
 
       // Pin to medium so primary is gpt-4o-mini with fallback gemini-1.5-flash
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -556,35 +623,36 @@ describe('provider.ts', () => {
     });
 
     it('should skip model not found in registry and try fallback', async () => {
-      mockState.currentModelRegistry!.find = (provider: string, modelId: string) => {
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) => {
         if (modelId === 'gpt-4o-mini') return undefined; // primary not found
-        return { provider, id: modelId, input: ['text', 'image'] as const } as unknown as Model<Api>;
+        return createTestModel({
+          provider,
+          id: modelId,
+          input: ['text', 'image'],
+        });
       };
 
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
       vi.mocked(streamSimple).mockReturnValue(
-        (async function* () {
-          yield { type: 'text_delta', delta: 'answer from fallback' };
-          yield { type: 'done', message: { usage: { cost: { total: 0.002 } } } };
-        })() as unknown as ReturnType<typeof streamSimple>,
+        createDelegateStream('answer from fallback', 0.002),
       );
 
       // Pin to medium so primary is gpt-4o-mini with fallback gemini-1.5-flash
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      registeredProviderOptions!.streamSimple!(model, context);
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -593,50 +661,43 @@ describe('provider.ts', () => {
     });
 
     it('should push error when all models in chain fail', async () => {
-      vi.mocked(streamSimple).mockImplementation((() => {
-        return (async function* () {
-          throw new Error('model unavailable');
-        })() as unknown as ReturnType<typeof streamSimple>;
-      }));
+      vi.mocked(streamSimple).mockImplementation(() =>
+        createFailingStream('model unavailable'),
+      );
 
       registerRouterProvider(mockPi, mockState, mockActions);
-      const stream = new MockEventStream();
-      vi.mocked(createAssistantMessageEventStream).mockReturnValue(
-        stream as unknown as AssistantMessageEventStream,
-      );
 
       // Pin to medium to get fallback chain
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = {
+      const model = createTestModel({
         id: 'balanced',
-        api: 'router-api' as Api,
         provider: 'router',
-      } as unknown as Model<Api>;
-      const context = { messages: [{ role: 'user', content: 'hello' }] } as unknown as Context;
+      });
+      const context = normalizeContext({
+        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+      });
 
-      registeredProviderOptions!.streamSimple(model, context);
+      const stream = registeredProviderOptions!.streamSimple!(model, context);
+      const result = await stream.result();
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      const errorEvent = stream.events.find((e) => e.type === 'error');
-      expect(errorEvent).toBeDefined();
-      expect(errorEvent?.error?.errorMessage).toContain('model unavailable');
+      expect(result.stopReason).toBe('error');
+      expect(result.errorMessage).toContain('model unavailable');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
   });
 
   describe('waitForRegistry', () => {
     it('should return registry immediately if already available', async () => {
-      const mockRegistry = { find: vi.fn() } as unknown as ExtensionContext['modelRegistry'];
+      const mockRegistry = { find: vi.fn() };
       const state = { currentModelRegistry: mockRegistry };
       const result = await waitForRegistry(state, 1000);
       expect(result).toBe(mockRegistry);
     });
 
     it('should wait and return registry when it becomes available', async () => {
-      const mockRegistry = { find: vi.fn() } as unknown as ExtensionContext['modelRegistry'];
-      const state: { currentModelRegistry: ExtensionContext['modelRegistry'] | undefined } = {
+      const mockRegistry = { find: vi.fn() };
+      const state: { currentModelRegistry: typeof mockRegistry | undefined } = {
         currentModelRegistry: undefined,
       };
 
@@ -651,7 +712,7 @@ describe('provider.ts', () => {
 
     it('should return undefined after timeout if registry never becomes available', async () => {
       const state = { currentModelRegistry: undefined };
-      const result = await waitForRegistry(state, 200);
+      const result = await waitForRegistry(state, 300);
       expect(result).toBeUndefined();
     });
   });

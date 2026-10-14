@@ -1,5 +1,10 @@
 import { streamSimple } from '@earendil-works/pi-ai/compat';
-import type { Context, Message } from '@earendil-works/pi-ai';
+import {
+  normalizeContext,
+  type Context,
+  type Message,
+  type SimpleStreamOptions,
+} from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RouterTier,
@@ -456,12 +461,28 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
       ? { ...model, baseUrl: auth.baseUrl }
       : model;
 
-    const stream = streamSimple(effectiveModel, classifierContext, {
+    const providerConfig = modelRegistry.getRegisteredProviderConfig?.(
+      effectiveModel.provider,
+    );
+    const customStreamSimple =
+      providerConfig?.streamSimple &&
+      (!providerConfig.api || providerConfig.api === effectiveModel.api)
+        ? providerConfig.streamSimple
+        : undefined;
+    const streamOptions: SimpleStreamOptions = {
       apiKey,
       headers,
       ...(auth.env ? { env: auth.env } : {}),
       ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-    });
+    };
+
+    const stream = customStreamSimple
+      ? customStreamSimple(
+          effectiveModel,
+          normalizeContext(classifierContext),
+          streamOptions,
+        )
+      : streamSimple(effectiveModel, classifierContext, streamOptions);
     let fullText = '';
     for await (const event of stream) {
       if (event.type === 'text_delta') {

@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { Api, Model } from '@earendil-works/pi-ai';
+import type { Api, Model, SimpleStreamOptions } from '@earendil-works/pi-ai';
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -32,7 +32,21 @@ export type RouterModelLookup = Pick<ExtensionContext['modelRegistry'], 'find'>;
 export type RouterModelRegistry = Pick<
   ExtensionContext['modelRegistry'],
   'find' | 'getApiKeyAndHeaders'
->;
+> &
+  Partial<
+    Pick<ExtensionContext['modelRegistry'], 'getRegisteredProviderConfig'>
+  >;
+
+export type ResolvedModelRequest =
+  | {
+      ok: true;
+      model: Model<Api>;
+      streamOptions: Pick<SimpleStreamOptions, 'apiKey' | 'headers' | 'env'>;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
 
 export interface RouterUIContext {
   ui: {

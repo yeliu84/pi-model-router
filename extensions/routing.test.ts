@@ -633,5 +633,153 @@ describe('routing.ts', () => {
       );
       expect(result).toBeUndefined();
     });
+
+    it('should accept headers-only authentication in runClassifier', async () => {
+      const headersOnlyRegistry: RouterModelRegistry = {
+        find: (provider: string, modelId: string) =>
+          createClassifierModel(provider, modelId),
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: undefined,
+          headers: { Authorization: 'Bearer kimi-oauth-token' },
+        }),
+      };
+
+      const mockStream = createTextDeltaStream(
+        'Tier: low\n',
+        'Reasoning: Short lookup.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
+
+      const result = await runClassifier(
+        'kimi-coding/k3',
+        headersOnlyRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'Short lookup.',
+      });
+    });
+
+    it('should merge model.headers with auth.headers and run classifier without apiKey', async () => {
+      const mockStream = createTextDeltaStream(
+        'Tier: low\n',
+        'Reasoning: Simple greeting.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
+
+      const customHeadersRegistry: RouterModelRegistry = {
+        find: (provider: string, modelId: string) => {
+          if (provider === 'openai' && modelId === 'gpt-4o') {
+            return {
+              ...createClassifierModel(provider, modelId),
+              headers: {
+                'cf-aig-authorization': 'Bearer cf-token',
+                'x-custom': 'from-model',
+              },
+            };
+          }
+          return undefined;
+        },
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: undefined,
+          headers: {
+            'x-custom': 'from-auth',
+          },
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        customHeadersRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'Simple greeting.',
+      });
+      expect(streamSimple).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'gpt-4o' }),
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: undefined,
+          headers: {
+            'cf-aig-authorization': 'Bearer cf-token',
+            'x-custom': 'from-auth',
+          },
+        }),
+      );
+    });
+
+    it('should override model.baseUrl with auth.baseUrl when running classifier (e.g. GitHub Copilot proxy-ep)', async () => {
+      const mockStream = createTextDeltaStream(
+        'Tier: low\n',
+        'Reasoning: Copilot classifier.',
+      );
+      vi.mocked(streamSimple).mockReturnValue(mockStream);
+
+      const copilotRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: 'copilot-oauth-token',
+          headers: {},
+          baseUrl: 'https://api.enterprise.githubcopilot.com',
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        copilotRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'Copilot classifier.',
+      });
+      expect(streamSimple).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'gpt-4o',
+          baseUrl: 'https://api.enterprise.githubcopilot.com',
+        }),
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: 'copilot-oauth-token',
+        }),
+      );
+    });
+
+    it('should use custom registered provider streamSimple when available', async () => {
+      vi.mocked(streamSimple).mockClear();
+      const customStreamFn = vi
+        .fn()
+        .mockReturnValue(
+          createTextDeltaStream(
+            'Tier: medium\n',
+            'Reasoning: Custom provider classifier.',
+          ),
+        );
+      const customProviderRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        getRegisteredProviderConfig: vi.fn().mockReturnValue({
+          api: 'openai-completions',
+          streamSimple: customStreamFn,
+        }),
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        customProviderRegistry,
+        context,
+      );
+      expect(result).toEqual({
+        tier: 'medium',
+        reasoning: 'Custom provider classifier.',
+      });
+      expect(customStreamFn).toHaveBeenCalled();
+      expect(streamSimple).not.toHaveBeenCalled();
+    });
   });
 });

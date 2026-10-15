@@ -449,6 +449,7 @@ const routerExtension = <
 
   pi.on('turn_start', async (_event, ctx) => {
     ensureInitializedFromContext(ctx);
+    actions.registerRouterProvider();
   });
 
   pi.on('model_select', async (event, ctx) => {

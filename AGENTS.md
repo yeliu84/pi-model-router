@@ -7,12 +7,12 @@ The `pi-model-router` is an extension-first model router for the `pi` coding age
 ## Architectural Principles
 
 - **Extension-First**: All functionality must be implemented as a `pi` extension without modifying `pi` core.
-- **Custom Provider**: Use `pi.registerProvider` to hook into the model lifecycle. The logical model (e.g., `router/auto`) should remain stable while the underlying model changes transparently.
+- **Virtual Models**: Use `pi.registerVirtualModel` (and `pi.unregisterVirtualModel`) to expose profiles (`router/<profile>`) as virtual models. Selection remains stable on the virtual model while each request routes to a concrete physical model and thinking level.
 - **Modularized Design**: Strictly follow the modular structure defined in Phase 3:
   - `extensions/types.ts`: All interfaces and type definitions.
   - `extensions/config.ts`: Configuration loading, normalization, and merging.
-  - `extensions/routing.ts`: Core routing logic (heuristics, classifier, rule matching).
-  - `extensions/provider.ts`: Custom `router` provider registration and delegation stream.
+  - `extensions/routing.ts`: Core routing logic (heuristics, native & LLM classifiers, rule matching).
+  - `extensions/provider.ts`: Virtual model registration (`router/*`) and `route(request, ctx)` handler.
   - `extensions/state.ts`: Session-persisted state management and snapshotting.
   - `extensions/ui.ts`: UI status line and widget rendering logic.
   - `extensions/commands.ts`: CLI command registrations and completions.

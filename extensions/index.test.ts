@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Api, Model } from '@earendil-works/pi-ai';
+import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type {
   CustomSessionEntry,
   RouterExtensionAPI,
@@ -7,6 +8,9 @@ import type {
   RouterThinkingLevelSelectEvent,
 } from './types';
 import routerExtension from './index';
+
+const _extensionFactoryTypeCheck: ExtensionFactory = routerExtension;
+void _extensionFactoryTypeCheck;
 
 vi.mock('./config', () => ({
   loadRouterConfig: () => ({
@@ -34,6 +38,7 @@ vi.mock('./config', () => ({
   getUnsupportedTiers: (): string[] => [],
   ROUTER_TIERS: ['high', 'medium', 'low'] as const,
   ROUTER_PIN_VALUES: ['auto', 'high', 'medium', 'low'] as const,
+  DEFAULT_THINKING_LEVELS: ['high', 'medium', 'low'] as const,
   THINKING_LEVELS: [
     'off',
     'minimal',
@@ -44,6 +49,8 @@ vi.mock('./config', () => ({
     'max',
   ] as const,
   isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
+  isObjectRecord: (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v),
 }));
 
 const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
@@ -92,7 +99,13 @@ const buildMockCtx = () => ({
 
 type MockCtx = ReturnType<typeof buildMockCtx>;
 
-type FullRouterEvent = RouterModelSelectEvent & RouterThinkingLevelSelectEvent;
+type FullRouterEvent = RouterModelSelectEvent &
+  RouterThinkingLevelSelectEvent & {
+    message?: {
+      role?: string;
+      usage?: { cost?: { total?: number } };
+    };
+  };
 
 type RegisteredHandler = (
   event: FullRouterEvent,
@@ -105,6 +118,8 @@ type TriggerHandler = (
 ) => Promise<void> | void;
 
 const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
+  registerVirtualModel: vi.fn(() => {}),
+  unregisterVirtualModel: vi.fn(() => {}),
   registerProvider: vi.fn(() => {}),
   registerCommand: vi.fn(() => {}),
   setModel: vi.fn(async () => true),
@@ -136,12 +151,14 @@ describe('index.ts (orchestrator)', () => {
     mockPi = createMockPi(eventListeners);
   });
 
-  it('should initialize and register commands, provider, and event hooks', () => {
+  it('should initialize and register commands, virtual models, and event hooks', () => {
     routerExtension(mockPi);
 
-    expect(mockPi.registerProvider).toHaveBeenCalledWith(
-      'router',
-      expect.any(Object),
+    expect(mockPi.registerVirtualModel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'router',
+        id: 'balanced',
+      }),
     );
     expect(mockPi.registerCommand).toHaveBeenCalledWith(
       'router',
@@ -746,7 +763,7 @@ describe('index.ts (orchestrator)', () => {
       expect(mockCtx2.ui.setStatus).not.toHaveBeenCalled();
     });
 
-    it('should refresh router provider registration on turn_start when dynamic models (e.g. llama.cpp) are added after session_start', async () => {
+    it('should refresh router virtual model registration on turn_start when dynamic models (e.g. llama.cpp) are added after session_start', async () => {
       let dynamicModelLoaded = false;
       routerExtension(mockPi);
 
@@ -775,7 +792,7 @@ describe('index.ts (orchestrator)', () => {
         await handler({}, mockCtx);
       }
 
-      mockPi.registerProvider.mockClear();
+      mockPi.registerVirtualModel.mockClear();
 
       // Simulate dynamic model registration (e.g. via /llama command after session_start)
       dynamicModelLoaded = true;
@@ -785,15 +802,39 @@ describe('index.ts (orchestrator)', () => {
         await handler({}, mockCtx);
       }
 
-      expect(mockPi.registerProvider).toHaveBeenCalledWith(
-        'router',
+      expect(mockPi.registerVirtualModel).toHaveBeenCalledWith(
         expect.objectContaining({
-          models: expect.arrayContaining([
-            expect.objectContaining({
-              id: 'balanced',
-              reasoning: true,
-            }),
-          ]),
+          provider: 'router',
+          id: 'balanced',
+          thinkingLevels: ['off', 'low', 'medium', 'high'],
+        }),
+      );
+    });
+
+    it('should accumulate assistant message cost on turn_end when router is enabled', async () => {
+      routerExtension(mockPi);
+      const mockCtx = buildMockCtx();
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      mockPi.appendEntry.mockClear();
+
+      const turnEndHandlers = eventListeners['turn_end'] || [];
+      const assistantMessage = {
+        role: 'assistant',
+        usage: { cost: { total: 0.0042 } },
+      };
+      for (const handler of turnEndHandlers) {
+        await handler({ message: assistantMessage }, mockCtx);
+      }
+
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          accumulatedCost: 0.0042,
         }),
       );
     });

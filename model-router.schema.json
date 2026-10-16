@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/yeliu84/pi-model-router/main/model-router.schema.json",
+  "title": "Pi Model Router Configuration",
+  "description": "Configuration schema for pi-model-router (~/.pi/agent/model-router.json or .pi/model-router.json).",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI for editor validation and autocompletion."
+    },
+    "debug": {
+      "type": "boolean",
+      "default": false,
+      "description": "Enable turn-by-turn routing debug notifications and history."
+    },
+    "classifierModel": {
+      "description": "Classifier model used to categorize user intent. Accepts \"auto\" (uses first available Pi native classifier such as Jev, Clef, GPT-6 Luna, or llama.cpp classifier), a model alias from \"models\", a canonical \"provider/model\" reference, or an object with \"model\" and optional \"thinking\".",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": ["model"],
+          "properties": {
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Model reference (\"auto\", alias from \"models\", or \"provider/model\")."
+            },
+            "thinking": {
+              "$ref": "#/$defs/thinkingLevel",
+              "description": "Thinking level when using a reasoning-capable chat LLM as classifier."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "phaseBias": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0.5,
+      "description": "Stickiness of the current conversation phase (0.0 to 1.0). Higher values keep the router in the current tier more consistently."
+    },
+    "maxSessionBudget": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Maximum session spend in USD. Once exceeded, high-tier requests automatically downgrade to medium."
+    },
+    "models": {
+      "type": "object",
+      "description": "Map of reusable model aliases to model definitions and capability overrides.",
+      "additionalProperties": {
+        "$ref": "#/$defs/modelDefinition"
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Custom keyword-based routing rules evaluated against the latest user prompt.",
+      "items": {
+        "$ref": "#/$defs/routingRule"
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Map of virtual router profiles (exposed as router/<profile>). Each profile must define at least one tier.",
+      "additionalProperties": {
+        "$ref": "#/$defs/routerProfile"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "thinkingLevel": {
+      "type": "string",
+      "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    },
+    "routerTier": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "modelDefinition": {
+      "type": "object",
+      "required": ["model"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "pattern": "^[^/\\s]+/[^\\s]+$",
+          "description": "Canonical \"provider/model\" identifier."
+        },
+        "contextWindow": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Context window size in tokens (used when not reported by the model registry)."
+        },
+        "maxTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "description": "Maximum output tokens (used when not reported by the model registry)."
+        },
+        "reasoning": {
+          "type": "boolean",
+          "description": "Whether the model supports reasoning/thinking levels."
+        },
+        "thinkingLevels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/thinkingLevel"
+          },
+          "description": "Supported thinking levels for this model."
+        }
+      },
+      "additionalProperties": false
+    },
+    "routedTierConfig": {
+      "type": "object",
+      "required": ["model"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical \"provider/model\" identifier or an alias from \"models\"."
+        },
+        "thinking": {
+          "$ref": "#/$defs/thinkingLevel",
+          "default": "medium",
+          "description": "Default thinking level for this tier."
+        },
+        "fallbacks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Ordered list of fallback models (\"provider/model\" or alias) if the primary model is unavailable or fails."
+        },
+        "contextWindow": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "maxTokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "reasoning": {
+          "type": "boolean"
+        },
+        "thinkingLevels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/thinkingLevel"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "routerProfile": {
+      "type": "object",
+      "properties": {
+        "high": {
+          "$ref": "#/$defs/routedTierConfig",
+          "description": "High tier: architecture, design, planning, complex debugging."
+        },
+        "medium": {
+          "$ref": "#/$defs/routedTierConfig",
+          "description": "Medium tier: standard implementation, multi-file edits, focused fixes."
+        },
+        "low": {
+          "$ref": "#/$defs/routedTierConfig",
+          "description": "Low tier: summaries, changelogs, formatting, quick lookups."
+        }
+      },
+      "anyOf": [
+        { "required": ["high"] },
+        { "required": ["medium"] },
+        { "required": ["low"] }
+      ],
+      "additionalProperties": false
+    },
+    "routingRule": {
+      "type": "object",
+      "required": ["matches", "tier"],
+      "properties": {
+        "matches": {
+          "description": "Keyword or list of keywords to match case-insensitively against the user prompt.",
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            }
+          ]
+        },
+        "tier": {
+          "$ref": "#/$defs/routerTier"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional human-readable reason displayed when this rule matches."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

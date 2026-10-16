@@ -20,9 +20,13 @@ import {
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import { isRouterPersistedState, buildPersistedState } from './state';
-import { updateStatus } from './ui';
+import { updateStatus, formatDecision } from './ui';
 import { registerCommands } from './commands';
-import { registerRouterProvider } from './provider';
+import {
+  registerRouterProvider,
+  markMessageCostCounted,
+  extractUncountedMessageCost,
+} from './provider';
 
 const routerExtension = <
   TCtx extends RouterExtensionContext = ExtensionContext,
@@ -77,6 +81,16 @@ const routerExtension = <
 
   const recordDebugDecision = (decision: RoutingDecision) => {
     debugHistory = [...debugHistory, decision].slice(-MAX_DEBUG_HISTORY);
+    if (debugEnabled && lastExtensionContext) {
+      try {
+        lastExtensionContext.ui.notify(
+          `[router] ${formatDecision(decision)}`,
+          'info',
+        );
+      } catch {
+        // Ignore notification errors on stale context.
+      }
+    }
   };
 
   const getThinkingOverride = (profileName: string, tier: RouterTier) => {
@@ -300,6 +314,11 @@ const routerExtension = <
 
     const entries: readonly CustomSessionEntry[] =
       ctx.sessionManager.getBranch();
+    for (const entry of entries) {
+      if (entry.type === 'message' && entry.message !== undefined) {
+        markMessageCostCounted(entry.message);
+      }
+    }
     const savedState = entries
       .filter(
         (entry) =>
@@ -486,8 +505,11 @@ const routerExtension = <
     actions.updateStatus(ctx);
   });
 
-  pi.on('turn_end', async (_event, ctx) => {
+  pi.on('turn_end', async (event, ctx) => {
     ensureInitializedFromContext(ctx);
+    if (routerEnabled) {
+      accumulatedCost += extractUncountedMessageCost(event);
+    }
     if (routerEnabled && selectedProfile && ctx.model?.provider !== 'router') {
       const routerModel = ctx.modelRegistry.find('router', selectedProfile);
       if (routerModel) {

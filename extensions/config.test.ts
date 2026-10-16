@@ -673,5 +673,30 @@ describe('config.ts', () => {
       expect(warnings.length).toBe(1);
       expect(warnings[0]).toContain('missing the "model" field');
     });
+
+    it('should normalize classifierModel as "auto" string or object', () => {
+      const rawString = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: 'auto',
+      };
+      const resString = normalizeConfig(rawString);
+      expect(resString.config.classifierModel).toEqual({ model: 'auto' });
+      expect(resString.warnings).toEqual([]);
+
+      const rawObj = {
+        profiles: {
+          balanced: { high: { model: 'openai/gpt-4o' } },
+        },
+        classifierModel: { model: 'auto', thinking: 'low' },
+      };
+      const resObj = normalizeConfig(rawObj);
+      expect(resObj.config.classifierModel).toEqual({
+        model: 'auto',
+        thinking: 'low',
+      });
+      expect(resObj.warnings).toEqual([]);
+    });
   });
 });

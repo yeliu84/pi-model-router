@@ -12,20 +12,28 @@ The router is organized into **Profiles** (e.g., `balanced`, `cheap`, `deep`). E
 - **Medium**: The default for standard implementation, multi-file edits, and focused fixes.
 - **Low**: Used for summaries, changelogs, formatting, and simple read-only lookups.
 
-### 2. Custom Provider Implementation
+### 2. Virtual Model Implementation
 
-The extension uses `pi.registerProvider` to hook into the `pi` model lifecycle. This ensures that the selected model in the `pi` footer remains stable (e.g., `router/balanced`) while the underlying model changes transparently turn-by-turn via the `streamSimple` interception.
+The extension uses `pi.registerVirtualModel` (and `pi.unregisterVirtualModel`) to register each configured profile under the `router` provider (`router/<profile>`). Pi cleanly separates **Selection** (`model_change` entries keep `router/<profile>`) from **Dispatch** (each assistant message records the physical `provider`, `model`, and `thinkingLevel`). This provides:
+
+- Native footer display (`profile • level → physical-model • level`) and per-physical-model cost breakdown in `/session`.
+- Safe conversation replay across different physical models and providers.
+- Native pre-request auto-compaction when routing to a physical model whose context window is smaller than the current transcript.
 
 ## Routing Decision Flow
 
-For every request sent to a `router/*` model, the following logic is executed:
+For every request sent to a `router/*` virtual model, `route(request, ctx)` inspects `request.reason`:
 
-1. **Budget Check**: If a `maxSessionBudget` is configured and the session spend exceeds it, the router automatically downgrades `high` tier requests to `medium`.
-2. **Manual Pin**: If the user has pinned a tier via `/router pin` or `/router fix`, that tier is used.
-3. **Custom Rules**: Keyword-based rules defined in the config are checked against the user prompt.
-4. **LLM Classifier (Optional)**: If `classifierModel` is configured, a fast LLM is called to categorize the user's intent.
-5. **Heuristics (Fallback)**: If the classifier is off or fails, a fast local heuristic (keyword/length/tool-use analysis) is used.
-6. **Biased Stickiness**: The `phaseBias` setting modulates thresholds to keep the router in a consistent phase (e.g., staying in `high` tier during a multi-turn planning session).
+- **`direct` requests** (e.g., compaction summaries): Routed directly to the `medium` (or pinned) tier without mutating session routing state or running the classifier.
+- **`continuation` requests** (tool-result continuations within a turn): Preserves the previous routed model for the turn to maintain provider prompt caches and thinking signatures (unless a new pin, budget cap, or image attachment requires switching).
+- **`retry` requests** (automatic retry after a failed request): Advances to the next available model in the tier's `fallbacks` chain after `request.failed.model`.
+- **`user` requests** (new user prompt, steer, or follow-up): Executes the full tier selection pipeline:
+  1. **Budget Check**: If `maxSessionBudget` is configured and session spend exceeds it, downgrades `high` tier requests to `medium`.
+  2. **Manual Pin**: Uses the tier pinned via `/router pin` or `/router fix`.
+  3. **Custom Rules**: Matches keyword-based rules defined in config against the user prompt.
+  4. **Classifier (Optional)**: When `classifierModel` is configured, prefers Pi's native classifier models (`ctx.modelRegistry.classify()` with `"auto"`, TypeSafe Jev, Cloudflare Clef, OpenAI GPT-6 Luna, or `llama.cpp` classifiers) and falls back to chat LLM classification (`ctx.modelRegistry.streamSimple()`).
+  5. **Heuristics (Fallback)**: Uses fast local heuristics (keyword/length/tool-use analysis) if the classifier is off or fails.
+  6. **Biased Stickiness**: The `phaseBias` setting modulates heuristic thresholds and low-confidence classifier probabilities to keep the router in a consistent phase.
 
 ## Module Architecture
 

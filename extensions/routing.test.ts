@@ -7,12 +7,15 @@ import {
   countToolResults,
   countWords,
   hasImageAttachment,
+  extractLastUserImages,
   containsAny,
   phaseForTier,
+  tierForPhase,
   resolveAvailableTier,
   buildRoutingDecision,
   decideRouting,
   runClassifier,
+  runNativeClassifier,
 } from './routing';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
 import {
@@ -20,6 +23,9 @@ import {
   type AssistantMessageEventStream,
   type Api,
   type AssistantMessage,
+  type ClassifierApi,
+  type ClassifierModel,
+  type ClassifierResult,
   type Context,
   type Message,
   type Model,
@@ -780,6 +786,231 @@ describe('routing.ts', () => {
       });
       expect(customStreamFn).toHaveBeenCalled();
       expect(streamSimple).not.toHaveBeenCalled();
+    });
+
+    it('should use modelRegistry.streamSimple directly when available for chat LLM classifier', async () => {
+      const registryStreamSimple = vi
+        .fn()
+        .mockReturnValue(
+          createTextDeltaStream('Tier: high\n', 'Reasoning: Registry stream.'),
+        );
+      const registryWithStreamSimple: RouterModelRegistry = {
+        ...mockRegistry,
+        streamSimple: registryStreamSimple,
+      };
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        registryWithStreamSimple,
+        context,
+        'planning',
+        'high',
+      );
+      expect(result).toEqual({
+        tier: 'high',
+        reasoning: 'Registry stream.',
+      });
+      expect(registryStreamSimple).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: 'openai', id: 'gpt-4o' }),
+        expect.anything(),
+        expect.objectContaining({ reasoning: 'high' }),
+      );
+    });
+
+    it('should classify using Pi native classifier model via findOfType and classify()', async () => {
+      const nativeClassifier: ClassifierModel<ClassifierApi> = {
+        type: 'classifier',
+        id: 'jev-latest',
+        name: 'Jev Latest',
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        baseUrl: 'https://api.typesafe.ai',
+        input: ['text'],
+        contextWindow: 32000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const classifyResult: ClassifierResult = {
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        model: 'jev-latest',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {
+          input: 100,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 101,
+          cost: {
+            input: 0.0001,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.0001,
+          },
+        },
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'high',
+            probabilities: { high: 0.82, medium: 0.14, low: 0.04 },
+            confidence: 0.73,
+          },
+        },
+      };
+
+      const classifyFn = vi.fn().mockResolvedValue(classifyResult);
+      const nativeRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        findOfType: vi.fn().mockReturnValue(nativeClassifier),
+        classify: classifyFn,
+      };
+
+      const result = await runClassifier(
+        'typesafe/jev-latest',
+        nativeRegistry,
+        context,
+        'planning',
+      );
+
+      expect(classifyFn).toHaveBeenCalled();
+      expect(result).toEqual({
+        tier: 'high',
+        reasoning: 'typesafe/jev-latest selected high (p=82%, conf=73%).',
+        cost: 0.0001,
+      });
+    });
+
+    it('should support "auto" classifierModel via getAvailableOfType("classifier")', async () => {
+      const lunaClassifier: ClassifierModel<ClassifierApi> = {
+        type: 'classifier',
+        id: 'gpt-6-luna',
+        name: 'GPT-6 Luna',
+        api: 'openai-decisions',
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        input: ['text', 'image'],
+        contextWindow: 922000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const classifyFn = vi.fn().mockResolvedValue({
+        api: 'openai-decisions',
+        provider: 'openai',
+        model: 'gpt-6-luna',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'low',
+            probabilities: { high: 0.05, medium: 0.15, low: 0.8 },
+            confidence: 0.7,
+          },
+        },
+      } satisfies ClassifierResult);
+
+      const autoRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        getAvailableOfType: vi.fn().mockResolvedValue([lunaClassifier]),
+        classify: classifyFn,
+      };
+
+      const imageContext: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'What is in this screenshot?' },
+              { type: 'image', data: 'base64img', mimeType: 'image/png' },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      };
+
+      const result = await runClassifier('auto', autoRegistry, imageContext);
+      expect(result).toEqual({
+        tier: 'low',
+        reasoning: 'openai/gpt-6-luna selected low (p=80%, conf=70%).',
+      });
+      // Since lunaClassifier supports 'image', images should be passed to classify()
+      expect(classifyFn).toHaveBeenCalledWith(
+        lunaClassifier,
+        expect.objectContaining({
+          images: [{ type: 'image', data: 'base64img', mimeType: 'image/png' }],
+        }),
+        undefined,
+      );
+    });
+
+    it('should apply phaseBias to borderline low-confidence native classifier probabilities', async () => {
+      const nativeClassifier: ClassifierModel<ClassifierApi> = {
+        type: 'classifier',
+        id: 'jev-latest',
+        name: 'Jev Latest',
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        baseUrl: 'https://api.typesafe.ai',
+        input: ['text'],
+        contextWindow: 32000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const classifyFn = vi.fn().mockResolvedValue({
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        model: 'jev-latest',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'medium',
+            probabilities: { high: 0.44, medium: 0.46, low: 0.1 },
+            confidence: 0.19,
+          },
+        },
+      } satisfies ClassifierResult);
+
+      const nativeRegistry: RouterModelRegistry = {
+        ...mockRegistry,
+        findOfType: vi.fn().mockReturnValue(nativeClassifier),
+        classify: classifyFn,
+      };
+
+      const result = await runNativeClassifier(
+        'typesafe/jev-latest',
+        nativeRegistry,
+        context,
+        'planning',
+        0.5,
+      );
+
+      expect(result).toEqual({
+        tier: 'high',
+        reasoning:
+          'typesafe/jev-latest selected high (p=44%, conf=19%) [phase-biased from medium].',
+      });
+    });
+
+    it('should extractLastUserImages and tierForPhase accurately', () => {
+      expect(tierForPhase('planning')).toBe('high');
+      expect(tierForPhase('implementation')).toBe('medium');
+      expect(tierForPhase('lightweight')).toBe('low');
+
+      const ctxWithImg: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'image', data: 'abc', mimeType: 'image/jpeg' }],
+            timestamp: Date.now(),
+          },
+        ],
+      };
+      expect(extractLastUserImages(ctxWithImg)).toHaveLength(1);
+      expect(extractLastUserImages(context)).toEqual([]);
     });
   });
 });

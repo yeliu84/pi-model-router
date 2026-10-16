@@ -1,6 +1,7 @@
 {
+  "$schema": "./model-router.schema.json",
   "debug": false,
-  "classifierModel": "flash",
+  "classifierModel": "auto",
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,
   "models": {

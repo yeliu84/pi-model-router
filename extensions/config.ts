@@ -428,46 +428,49 @@ export const normalizeConfig = (
     }
   }
 
-  // Resolve classifierModel — accepts string or { model, thinking } object
-  let classifierModel: ClassifierConfig | undefined;
-  const rawClassifier: unknown = raw.classifierModel;
-  if (typeof rawClassifier === 'string' && rawClassifier.trim()) {
+  // Resolve classifierModel — accepts string ("auto", alias, or "provider/model") or { model, thinking } object
+  const resolveClassifierRef = (
+    modelRef: string,
+    thinking?: ThinkingLevel,
+  ): ClassifierConfig | undefined => {
+    if (modelRef === 'auto') {
+      return { model: 'auto', ...(thinking ? { thinking } : {}) };
+    }
     const resolved = resolveModelRef(
-      rawClassifier.trim(),
+      modelRef,
       hasModels ? normalizedModels : undefined,
     );
     try {
       parseCanonicalModelRef(resolved.canonicalRef);
-      classifierModel = { model: resolved.canonicalRef };
+      return {
+        model: resolved.canonicalRef,
+        ...(thinking ? { thinking } : {}),
+      };
     } catch (error) {
       warnings.push(
         `Invalid classifierModel: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return undefined;
     }
+  };
+
+  let classifierModel: ClassifierConfig | undefined;
+  const rawClassifier: unknown = raw.classifierModel;
+  if (typeof rawClassifier === 'string' && rawClassifier.trim()) {
+    classifierModel = resolveClassifierRef(rawClassifier.trim());
   } else if (isObjectRecord(rawClassifier)) {
     const modelRef =
       typeof rawClassifier.model === 'string' ? rawClassifier.model.trim() : '';
     if (modelRef) {
-      const resolved = resolveModelRef(
-        modelRef,
-        hasModels ? normalizedModels : undefined,
-      );
-      try {
-        parseCanonicalModelRef(resolved.canonicalRef);
-        const thinking = isThinkingLevel(rawClassifier.thinking)
-          ? rawClassifier.thinking
-          : undefined;
-        if (rawClassifier.thinking !== undefined && !thinking) {
-          warnings.push(
-            `classifierModel has invalid thinking level "${String(rawClassifier.thinking)}". Ignored.`,
-          );
-        }
-        classifierModel = { model: resolved.canonicalRef, thinking };
-      } catch (error) {
+      const thinking = isThinkingLevel(rawClassifier.thinking)
+        ? rawClassifier.thinking
+        : undefined;
+      if (rawClassifier.thinking !== undefined && !thinking) {
         warnings.push(
-          `Invalid classifierModel: ${error instanceof Error ? error.message : String(error)}`,
+          `classifierModel has invalid thinking level "${String(rawClassifier.thinking)}". Ignored.`,
         );
       }
+      classifierModel = resolveClassifierRef(modelRef, thinking);
     } else {
       warnings.push(
         'classifierModel object is missing the "model" field. Ignored.',

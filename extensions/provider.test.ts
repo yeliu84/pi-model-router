@@ -1,48 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   registerRouterProvider,
-  createErrorMessage,
   waitForRegistry,
+  extractUncountedMessageCost,
+  markMessageCostCounted,
+  type RouterProviderState,
+  type RouterProviderActions,
 } from './provider';
-import {
-  createAssistantMessageEventStream,
-  normalizeContext,
-  type Api,
-  type AssistantMessage,
-  type AssistantMessageEvent,
-  type AssistantMessageEventStream,
-  type Context,
-  type Model,
-  type Provider,
-} from '@earendil-works/pi-ai';
-import { streamSimple } from '@earendil-works/pi-ai/compat';
-import type {
-  ExtensionAPI,
-  ProviderConfig,
-} from '@earendil-works/pi-coding-agent';
+import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RouterConfig,
-  RoutingDecision,
   RouterModelRegistry,
-  RouterPinByProfile,
-  RouterThinkingByProfile,
+  RouterVirtualModelDefinition,
+  VirtualRouterState,
+  ModelRouteRequest,
 } from './types';
-
-vi.mock('@earendil-works/pi-ai/compat', () => ({
-  streamSimple: vi.fn(),
-}));
-
-const createFailingStream = (
-  errorMessage: string,
-): AssistantMessageEventStream => {
-  const s = createAssistantMessageEventStream();
-  return Object.assign(s, {
-    async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
-      throw new Error(errorMessage);
-    },
-  });
-};
 
 const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
   id: 'gpt-4o',
@@ -82,72 +55,71 @@ const createAssistantMsg = (text: string, totalCost = 0): AssistantMessage => ({
   timestamp: Date.now(),
 });
 
-const createDelegateStream = (
-  text: string,
-  totalCost = 0,
-): AssistantMessageEventStream => {
-  const s = createAssistantMessageEventStream();
-  const msg = createAssistantMsg(text, totalCost);
-  s.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: msg });
-  s.push({ type: 'done', reason: 'stop', message: msg });
-  s.end(msg);
-  return s;
-};
-
 interface TestExtensionContext {
-  ui: {
-    setHiddenThinkingLabel: (label?: string) => void;
+  modelRegistry?: RouterModelRegistry;
+  ui?: {
+    setHiddenThinkingLabel?: (label?: string) => void;
   };
 }
 
-interface TestProviderState {
-  lastRegisteredModels: string;
+interface TestProviderState extends RouterProviderState<TestExtensionContext> {
   currentConfig: RouterConfig;
   currentModelRegistry: RouterModelRegistry | undefined;
   lastExtensionContext: TestExtensionContext | undefined;
-  selectedProfile: string | undefined;
-  routerEnabled: boolean;
-  lastDecision: RoutingDecision | undefined;
-  thinkingByProfile: RouterThinkingByProfile;
-  pinnedTierByProfile: RouterPinByProfile;
-  accumulatedCost: number;
   registryTimeoutMs?: number;
 }
 
-describe('provider.ts', () => {
-  let mockPi: Pick<ExtensionAPI, 'registerProvider'>;
+describe('provider.ts (virtual models)', () => {
+  let registeredVirtualModels: Map<
+    string,
+    RouterVirtualModelDefinition<VirtualRouterState, TestExtensionContext>
+  >;
+  let unregisteredVirtualModels: Array<{ provider: string; id: string }>;
+  let mockPi: {
+    registerVirtualModel: (
+      model: RouterVirtualModelDefinition<
+        VirtualRouterState,
+        TestExtensionContext
+      >,
+    ) => void;
+    unregisterVirtualModel: (provider: string, id: string) => void;
+  };
   let mockState: TestProviderState;
-  let mockActions: Parameters<
-    typeof registerRouterProvider<TestExtensionContext>
-  >[2];
-  let registeredProviderName: string | null = null;
-  let registeredProviderOptions: ProviderConfig | null = null;
+  let mockActions: RouterProviderActions<TestExtensionContext>;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    registeredProviderName = null;
-    registeredProviderOptions = null;
+    registeredVirtualModels = new Map();
+    unregisteredVirtualModels = [];
 
     mockPi = {
-      registerProvider: (
-        nameOrProvider: string | Provider,
-        options?: ProviderConfig,
-      ) => {
-        if (typeof nameOrProvider === 'string' && options) {
-          registeredProviderName = nameOrProvider;
-          registeredProviderOptions = options;
-        }
+      registerVirtualModel: (definition) => {
+        registeredVirtualModels.set(
+          `${definition.provider}/${definition.id}`,
+          definition,
+        );
+      },
+      unregisterVirtualModel: (provider, id) => {
+        unregisteredVirtualModels.push({ provider, id });
+        registeredVirtualModels.delete(`${provider}/${id}`);
       },
     };
 
     const config: RouterConfig = {
       profiles: {
         balanced: {
-          high: { model: 'openai/gpt-4o', resolvedContextWindow: 10000 },
+          high: {
+            model: 'openai/gpt-4o',
+            thinking: 'high',
+            resolvedContextWindow: 10000,
+            resolvedThinkingLevels: ['low', 'medium', 'high'],
+          },
           medium: {
             model: 'openai/gpt-4o-mini',
+            thinking: 'medium',
             resolvedContextWindow: 5000,
             fallbacks: ['google/gemini-1.5-flash'],
+            resolvedThinkingLevels: ['low', 'medium', 'high'],
           },
         },
       },
@@ -160,6 +132,7 @@ describe('provider.ts', () => {
             provider,
             id: modelId,
             input: ['text', 'image'],
+            reasoning: true,
             contextWindow: modelId === 'gpt-4o-mini' ? 5000 : 10000,
           });
         }
@@ -177,9 +150,7 @@ describe('provider.ts', () => {
       currentConfig: config,
       currentModelRegistry: mockRegistry,
       lastExtensionContext: {
-        ui: {
-          setHiddenThinkingLabel: vi.fn(),
-        },
+        modelRegistry: mockRegistry,
       },
       selectedProfile: undefined,
       routerEnabled: false,
@@ -198,155 +169,236 @@ describe('provider.ts', () => {
     };
   });
 
-  describe('createErrorMessage', () => {
-    it('should create a valid error AssistantMessage', () => {
-      const model = createTestModel({ provider: 'openai', id: 'gpt-4o' });
-      const msg = createErrorMessage(model, 'Test error message');
-      expect(msg.role).toBe('assistant');
-      expect(msg.errorMessage).toBe('Test error message');
-      expect(msg.stopReason).toBe('error');
-    });
+  const buildRequest = (
+    overrides: Partial<ModelRouteRequest<VirtualRouterState>> = {},
+  ): ModelRouteRequest<VirtualRouterState> => ({
+    model: createTestModel({
+      id: 'balanced',
+      provider: 'router',
+      api: 'pi-virtual' as Api,
+    }),
+    thinkingLevel: 'medium',
+    reason: 'user',
+    messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
+    ...overrides,
   });
 
   describe('registerRouterProvider', () => {
-    it('should register provider under router name', () => {
+    it('should register each profile as a virtual model under router provider', () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      expect(registeredProviderName).toBe('router');
-      expect(registeredProviderOptions).toBeDefined();
-      expect(registeredProviderOptions!.models![0].id).toBe('balanced');
+
+      const vm = registeredVirtualModels.get('router/balanced');
+      expect(vm).toBeDefined();
+      expect(vm!.provider).toBe('router');
+      expect(vm!.id).toBe('balanced');
+      expect(vm!.name).toBe('Router balanced');
+      expect(vm!.thinkingLevels).toEqual(['off', 'low', 'medium', 'high']);
     });
 
-    it('should delegate streams and accumulate cost on success', async () => {
+    it('should unregister removed profiles when config is reloaded', () => {
+      mockState.currentConfig.profiles.cheap = {
+        low: { model: 'openai/gpt-4o-mini' },
+      };
+      registerRouterProvider(mockPi, mockState, mockActions);
+      expect(registeredVirtualModels.has('router/balanced')).toBe(true);
+      expect(registeredVirtualModels.has('router/cheap')).toBe(true);
+
+      // Remove cheap profile and re-register
+      delete mockState.currentConfig.profiles.cheap;
       registerRouterProvider(mockPi, mockState, mockActions);
 
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('Answer part', 0.0015),
+      expect(unregisteredVirtualModels).toEqual([
+        { provider: 'router', id: 'cheap' },
+      ]);
+      expect(registeredVirtualModels.has('router/cheap')).toBe(false);
+    });
+
+    it('should route user requests and return physical model, clamped thinkingLevel, and branch state', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      const prevAssistant = createAssistantMsg('Previous turn', 0.0025);
+      const route = await vm.route(
+        buildRequest({
+          messages: [
+            prevAssistant,
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext!,
       );
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      // Wait for async execution of stream handler
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
+      expect(route.model.provider).toBe('openai');
+      expect(route.model.id).toBe('gpt-4o-mini');
+      expect(route.thinkingLevel).toBe('medium');
+      expect(route.state?.tier).toBe('medium');
+      expect(route.state?.phase).toBe('implementation');
       expect(mockState.selectedProfile).toBe('balanced');
       expect(mockState.routerEnabled).toBe(true);
-      expect(mockState.accumulatedCost).toBe(0.0015);
+      expect(mockState.accumulatedCost).toBe(0.0025);
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should try fallbacks if the primary model fails', async () => {
+    it('should route direct requests (e.g. compaction summaries) using active model without mutating session routing state', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
 
-      let callCount = 0;
-      vi.mocked(streamSimple).mockImplementation((model: Model<Api>) => {
-        callCount++;
-        if (model.id === 'gpt-4o-mini') {
-          return createFailingStream('primary failed');
-        }
-        return createDelegateStream('fallback answer', 0.0005);
-      });
+      // 1. Without active decision: falls back to medium tier default
+      const defaultRoute = await vm.route(
+        buildRequest({ reason: 'direct' }),
+        mockState.lastExtensionContext!,
+      );
 
-      // Force a medium tier routing decision
-      mockState.pinnedTierByProfile['balanced'] = 'medium';
+      expect(defaultRoute.model.provider).toBe('openai');
+      expect(defaultRoute.model.id).toBe('gpt-4o-mini');
+      expect(defaultRoute.state).toBeUndefined();
+      expect(mockState.lastDecision).toBeUndefined();
+      expect(mockActions.recordDebugDecision).not.toHaveBeenCalled();
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(callCount).toBe(2);
-      expect(mockState.accumulatedCost).toBe(0.0005);
-      expect(mockState.lastDecision!.isFallback).toBe(true);
-    });
-
-    it('should preserve previous Google model on Google thinking tool continuation', async () => {
-      registerRouterProvider(mockPi, mockState, mockActions);
-      vi.mocked(streamSimple).mockReturnValue(createDelegateStream('done'));
-
-      // Set up last decision as Google model with thinking
+      // 2. With active high-tier decision: reuses the active model to preserve prompt cache
       mockState.lastDecision = {
         profile: 'balanced',
         tier: 'high',
         phase: 'planning',
-        targetProvider: 'google',
-        targetModelId: 'gemini-2.5-pro',
-        targetLabel: 'google/gemini-2.5-pro',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o',
+        targetLabel: 'openai/gpt-4o',
         thinking: 'high',
-        reasoning: 'initial google model reasoning',
+        reasoning: 'Active planning turn',
         timestamp: Date.now(),
       };
 
-      // Configure profile tiers to use google provider models
-      mockState.currentConfig.profiles.balanced.high = {
-        model: 'google/gemini-2.5-pro',
-        thinking: 'high' as ThinkingLevel,
+      const activeRoute = await vm.route(
+        buildRequest({ reason: 'direct' }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(activeRoute.model.provider).toBe('openai');
+      expect(activeRoute.model.id).toBe('gpt-4o');
+      expect(activeRoute.thinkingLevel).toBe('high');
+      expect(activeRoute.state).toBeUndefined();
+    });
+
+    it('should preserve previous model on tool-result continuation across any provider', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      mockState.lastDecision = {
+        profile: 'balanced',
+        tier: 'high',
+        phase: 'planning',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o',
+        targetLabel: 'openai/gpt-4o',
+        thinking: 'high',
+        reasoning: 'Initial planning decision',
+        timestamp: Date.now(),
       };
-      mockState.currentConfig.profiles.balanced.medium = {
-        model: 'google/gemini-2.5-flash',
-        thinking: 'medium' as ThinkingLevel,
-      };
 
-      // Set up registry search
-      mockState.currentModelRegistry!.find = (
-        provider: string,
-        modelId: string,
-      ) =>
-        createTestModel({
-          provider,
-          id: modelId,
-          reasoning: true,
-          input: ['text'],
-        });
+      const route = await vm.route(
+        buildRequest({
+          reason: 'continuation',
+          messages: [
+            {
+              role: 'user',
+              content: 'plan the architecture',
+              timestamp: Date.now(),
+            },
+            {
+              role: 'toolResult',
+              toolCallId: 'c1',
+              toolName: 'read',
+              content: [{ type: 'text', text: 'file contents' }],
+              isError: false,
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [
-          { role: 'user', content: 'initial', timestamp: Date.now() },
-          {
-            role: 'toolResult',
-            toolCallId: 'c1',
-            toolName: 't',
-            content: [{ type: 'text', text: 'tool output' }],
-            isError: false,
-            timestamp: Date.now(),
-          },
-        ],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // The decision should be updated to preserve the previous model
-      expect(mockState.lastDecision!.targetModelId).toBe('gemini-2.5-pro');
+      expect(route.model.id).toBe('gpt-4o');
+      expect(route.thinkingLevel).toBe('high');
+      expect(mockState.lastDecision!.targetModelId).toBe('gpt-4o');
       expect(mockState.lastDecision!.reasoning).toContain(
-        'Preserved google/gemini-2.5-pro for a Google tool-result continuation',
+        'Preserved openai/gpt-4o for tool-result continuation',
       );
     });
 
-    it('should force higher tier if current tier does not support image attachments', async () => {
+    it('should advance to fallback model on retry when primary model failed', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
-      vi.mocked(streamSimple).mockReturnValue(createDelegateStream('done'));
+      const vm = registeredVirtualModels.get('router/balanced')!;
 
-      // Define medium tier model and fallback without image support, high tier model with image support
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+      mockState.lastDecision = {
+        profile: 'balanced',
+        tier: 'medium',
+        phase: 'implementation',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o-mini',
+        targetLabel: 'openai/gpt-4o-mini',
+        thinking: 'medium',
+        reasoning: 'Pinned medium',
+        timestamp: Date.now(),
+      };
+
+      const failedModel = createTestModel({
+        provider: 'openai',
+        id: 'gpt-4o-mini',
+      });
+      const failedMessage: AssistantMessage = {
+        ...createAssistantMsg('', 0),
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        stopReason: 'error',
+        errorMessage: '429 Too Many Requests',
+      };
+
+      const route = await vm.route(
+        buildRequest({
+          reason: 'retry',
+          failed: {
+            model: failedModel,
+            thinkingLevel: 'medium',
+            message: failedMessage,
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(route.model.provider).toBe('google');
+      expect(route.model.id).toBe('gemini-1.5-flash');
+      expect(mockState.lastDecision!.isFallback).toBe(true);
+      expect(mockState.lastDecision!.reasoning).toContain(
+        'Fallback to google/gemini-1.5-flash after openai/gpt-4o-mini failed (429 Too Many Requests)',
+      );
+    });
+
+    it('should fall back immediately when primary model is missing from registry or fails auth', async () => {
+      mockState.currentModelRegistry!.getApiKeyAndHeaders = async (
+        model: Model<Api>,
+      ) => {
+        if (model.id === 'gpt-4o-mini') {
+          return { ok: false, error: 'auth-error' };
+        }
+        return { ok: true, apiKey: 'fallback-key', headers: {} };
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+
+      const route = await vm.route(
+        buildRequest(),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(route.model.provider).toBe('google');
+      expect(route.model.id).toBe('gemini-1.5-flash');
+      expect(mockState.lastDecision!.isFallback).toBe(true);
+    });
+
+    it('should force higher tier if current tier does not support image attachments', async () => {
       mockState.currentModelRegistry!.find = (
         provider: string,
         modelId: string,
@@ -356,448 +408,73 @@ describe('provider.ts', () => {
             provider,
             id: modelId,
             input: ['text', 'image'],
+            reasoning: true,
           });
         }
         return createTestModel({
           provider,
           id: modelId,
           input: ['text'],
+          reasoning: true,
         });
       };
 
-      // Force a medium tier routing decision originally
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
       mockState.pinnedTierByProfile['balanced'] = 'medium';
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                mimeType: 'image/png',
-                data: 'data',
-              },
-            ],
-            timestamp: Date.now(),
-          },
-        ],
-      });
+      const route = await vm.route(
+        buildRequest({
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'image', mimeType: 'image/png', data: 'data' }],
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
 
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // It should force switch to high tier because medium doesn't support images
+      expect(route.model.id).toBe('gpt-4o');
       expect(mockState.lastDecision!.tier).toBe('high');
       expect(mockState.lastDecision!.reasoning).toContain(
         'Forced high tier because the originally routed medium tier does not support image attachments',
       );
     });
 
-    it('should auto-truncate context if target limit is smaller than reported context window', async () => {
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      let truncatedContextPassed: Context | null = null;
-      vi.mocked(streamSimple).mockImplementation(
-        (_model: Model<Api>, ctx: Context) => {
-          truncatedContextPassed = ctx;
-          return createDelegateStream('done');
-        },
-      );
-
-      // Medium tier model has resolvedContextWindow = 5000 in config.
-      // But let's verify if reported max context window of router is larger (which is 10000 from high tier).
-      mockState.pinnedTierByProfile['balanced'] = 'medium';
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-        contextWindow: 10000,
-      });
-
-      // Let's create a large context that exceeds 5000 tokens (approx 15000 chars)
-      const context = normalizeContext({
-        systemPrompt: 'System prompt instructions',
-        messages: [
-          { role: 'user', content: 'a'.repeat(8000), timestamp: Date.now() },
-          { role: 'user', content: 'b'.repeat(8000), timestamp: Date.now() },
-          { role: 'user', content: 'c'.repeat(2000), timestamp: Date.now() },
-        ],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(truncatedContextPassed).toBeDefined();
-      // Old messages should have been truncated to fit 5000 tokens limit (15000 chars approx)
-      // The first user message 'a'.repeat(8000) should have been dropped while preserving system & latest.
-      expect(truncatedContextPassed!.messages.length).toBeLessThan(
-        context.messages.length,
-      );
-      expect(
-        truncatedContextPassed!.messages[
-          truncatedContextPassed!.messages.length - 1
-        ].content,
-      ).toBe('c'.repeat(2000));
-    });
-
-    it('should preserve system messages in TranscriptContext during auto-truncation', async () => {
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      let truncatedContextPassed: Context | null = null;
-      vi.mocked(streamSimple).mockImplementation(
-        (_model: Model<Api>, ctx: Context) => {
-          truncatedContextPassed = ctx;
-          return createDelegateStream('done');
-        },
-      );
-
-      mockState.pinnedTierByProfile['balanced'] = 'medium';
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-        contextWindow: 10000,
-      });
-
-      const context = normalizeContext({
-        messages: [
-          {
-            role: 'system',
-            content: '',
-            sections: { main: 'System prompt instructions' },
-            timestamp: 0,
-          },
-          { role: 'user', content: 'a'.repeat(8000), timestamp: Date.now() },
-          { role: 'user', content: 'b'.repeat(8000), timestamp: Date.now() },
-          { role: 'user', content: 'c'.repeat(2000), timestamp: Date.now() },
-        ],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(truncatedContextPassed).toBeDefined();
-      expect(truncatedContextPassed!.messages[0].role).toBe('system');
-      expect(truncatedContextPassed!.messages.length).toBe(3);
-      expect(truncatedContextPassed!.messages[1].content).toBe(
-        'b'.repeat(8000),
-      );
-      expect(truncatedContextPassed!.messages[2].content).toBe(
-        'c'.repeat(2000),
-      );
-    });
-
-    it('should push error event when currentModelRegistry never becomes available', async () => {
+    it('should throw when registry never becomes available', async () => {
       mockState.currentModelRegistry = undefined;
-      mockState.registryTimeoutMs = 100; // Use short timeout for test
+      mockState.lastExtensionContext = {};
+      (mockState as { registryTimeoutMs?: number }).registryTimeoutMs = 50;
+
       registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      const stream = registeredProviderOptions!.streamSimple!(model, context);
-      const result = await stream.result();
-
-      expect(result.stopReason).toBe('error');
-      expect(result.errorMessage).toContain('timed out');
+      await expect(
+        vm.route(buildRequest(), mockState.lastExtensionContext),
+      ).rejects.toThrow('timed out');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
-    it('should wait and succeed when currentModelRegistry becomes available after a delay', async () => {
-      mockState.currentModelRegistry = undefined;
-      mockState.registryTimeoutMs = 500;
-      const mockRegistry: RouterModelRegistry = {
-        find: (provider: string, modelId: string) => {
-          if (provider === 'openai' || provider === 'google') {
-            return createTestModel({
-              provider,
-              id: modelId,
-              input: ['text', 'image'],
-            });
-          }
-          return undefined;
-        },
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          apiKey: 'test-key',
-          headers: {},
-        }),
-      };
-
+    it('should throw when profile is unknown', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
 
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('Answer', 0.001),
-      );
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      // Simulate session_start setting the registry after 10ms
-      setTimeout(() => {
-        mockState.currentModelRegistry = mockRegistry;
-      }, 10);
-
-      await vi.waitFor(
-        () => {
-          expect(mockState.routerEnabled).toBe(true);
-          expect(mockState.selectedProfile).toBe('balanced');
-        },
-        { timeout: 1000 },
-      );
-    });
-
-    it('should push error event when profile is unknown', async () => {
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      const model = createTestModel({
-        id: 'nonexistent-profile',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      const stream = registeredProviderOptions!.streamSimple!(model, context);
-      const result = await stream.result();
-
-      expect(result.stopReason).toBe('error');
-      expect(result.errorMessage).toContain('Unknown router profile');
-      expect(mockActions.persistState).toHaveBeenCalled();
-    });
-
-    it('should fall back when auth fails for primary model', async () => {
-      let authCallCount = 0;
-      mockState.currentModelRegistry!.getApiKeyAndHeaders = async (
-        model: Model<Api>,
-      ) => {
-        authCallCount++;
-        if (model.id === 'gpt-4o-mini') {
-          return { ok: false, error: 'auth-error' };
-        }
-        return { ok: true, apiKey: 'fallback-key', headers: {} };
-      };
-
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('fallback answer', 0.001),
-      );
-
-      // Pin to medium so primary is gpt-4o-mini with fallback gemini-1.5-flash
-      mockState.pinnedTierByProfile['balanced'] = 'medium';
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(authCallCount).toBeGreaterThanOrEqual(2);
-      expect(mockState.accumulatedCost).toBe(0.001);
-    });
-
-    it('should skip model not found in registry and try fallback', async () => {
-      mockState.currentModelRegistry!.find = (
-        provider: string,
-        modelId: string,
-      ) => {
-        if (modelId === 'gpt-4o-mini') return undefined; // primary not found
-        return createTestModel({
-          provider,
-          id: modelId,
-          input: ['text', 'image'],
-        });
-      };
-
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('answer from fallback', 0.002),
-      );
-
-      // Pin to medium so primary is gpt-4o-mini with fallback gemini-1.5-flash
-      mockState.pinnedTierByProfile['balanced'] = 'medium';
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      expect(mockState.accumulatedCost).toBe(0.002);
-      expect(mockState.lastDecision!.isFallback).toBe(true);
-    });
-
-    it('should push error when all models in chain fail', async () => {
-      vi.mocked(streamSimple).mockImplementation(() =>
-        createFailingStream('model unavailable'),
-      );
-
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      // Pin to medium to get fallback chain
-      mockState.pinnedTierByProfile['balanced'] = 'medium';
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      const stream = registeredProviderOptions!.streamSimple!(model, context);
-      const result = await stream.result();
-
-      expect(result.stopReason).toBe('error');
-      expect(result.errorMessage).toContain('model unavailable');
-      expect(mockActions.persistState).toHaveBeenCalled();
-    });
-
-    it('should accept headers-only authentication without apiKey (e.g. kimi-coding OAuth)', async () => {
-      mockState.currentConfig.profiles.balanced.high = {
-        model: 'kimi-coding/k3',
-      };
-      mockState.pinnedTierByProfile['balanced'] = 'high';
-      mockState.currentModelRegistry!.find = (
-        provider: string,
-        modelId: string,
-      ) => {
-        if (provider === 'kimi-coding' && modelId === 'k3') {
-          return createTestModel({
-            provider,
-            id: modelId,
-            api: 'anthropic-messages',
-          });
-        }
-        return undefined;
-      };
-      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
-        ok: true,
-        apiKey: undefined,
-        headers: { Authorization: 'Bearer kimi-oauth-token' },
-      });
-
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('kimi answer', 0.002),
-      );
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      const stream = registeredProviderOptions!.streamSimple!(model, context);
-      const result = await stream.result();
-
-      expect(result.stopReason).toBe('stop');
-      expect(vi.mocked(streamSimple)).toHaveBeenCalledWith(
-        expect.objectContaining({ provider: 'kimi-coding', id: 'k3' }),
-        expect.anything(),
-        expect.objectContaining({
-          apiKey: undefined,
-          headers: { Authorization: 'Bearer kimi-oauth-token' },
-        }),
-      );
-    });
-
-    it('should merge targetModel.headers from models.json with auth.headers and allow delegation without apiKey', async () => {
-      mockState.currentModelRegistry!.find = (
-        provider: string,
-        modelId: string,
-      ) =>
-        createTestModel({
-          provider,
-          id: modelId,
-          headers: {
-            'cf-aig-authorization': 'Bearer cf-token',
-            'x-custom': 'from-model',
-          },
-        });
-      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
-        ok: true,
-        apiKey: undefined,
-        headers: {
-          'x-custom': 'from-auth',
-          'x-extra': 'extra-val',
-        },
-      });
-
-      registerRouterProvider(mockPi, mockState, mockActions);
-
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('custom headers response', 0.001),
-      );
-
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await vi.waitFor(
-        () => {
-          expect(streamSimple).toHaveBeenCalledWith(
-            expect.objectContaining({ id: 'gpt-4o-mini' }),
-            expect.anything(),
-            expect.objectContaining({
-              apiKey: undefined,
-              headers: {
-                'cf-aig-authorization': 'Bearer cf-token',
-                'x-custom': 'from-auth',
-                'x-extra': 'extra-val',
-              },
+      await expect(
+        vm.route(
+          buildRequest({
+            model: createTestModel({
+              id: 'nonexistent',
+              provider: 'router',
             }),
-          );
-          expect(mockState.accumulatedCost).toBe(0.001);
-        },
-        { timeout: 1000 },
-      );
+          }),
+          mockState.lastExtensionContext!,
+        ),
+      ).rejects.toThrow('Unknown router profile');
     });
 
-    it('should override targetModel.baseUrl with auth.baseUrl when delegating (e.g. GitHub Copilot proxy-ep)', async () => {
+    it('should override targetModel.baseUrl with auth.baseUrl when resolving candidate', async () => {
       mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
         ok: true,
         apiKey: 'copilot-oauth-token',
@@ -806,74 +483,148 @@ describe('provider.ts', () => {
       });
 
       registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
 
-      vi.mocked(streamSimple).mockReturnValue(
-        createDelegateStream('copilot response', 0.002),
+      const route = await vm.route(
+        buildRequest(),
+        mockState.lastExtensionContext!,
       );
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await vi.waitFor(
-        () => {
-          expect(streamSimple).toHaveBeenCalledWith(
-            expect.objectContaining({
-              id: 'gpt-4o-mini',
-              baseUrl: 'https://api.enterprise.githubcopilot.com',
-            }),
-            expect.anything(),
-            expect.objectContaining({
-              apiKey: 'copilot-oauth-token',
-            }),
-          );
-          expect(mockState.accumulatedCost).toBe(0.002);
-        },
-        { timeout: 1000 },
+      expect(route.model.baseUrl).toBe(
+        'https://api.enterprise.githubcopilot.com',
       );
     });
 
-    it('should delegate to custom registered provider streamSimple when available', async () => {
-      const customStreamFn = vi
-        .fn()
-        .mockReturnValue(createDelegateStream('from custom provider', 0.004));
-      mockState.currentModelRegistry!.getRegisteredProviderConfig = vi
-        .fn()
-        .mockReturnValue({
-          api: 'openai-completions',
-          streamSimple: customStreamFn,
+    it('should clamp thinkingLevel to off when target model does not support reasoning', async () => {
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) =>
+        createTestModel({
+          provider,
+          id: modelId,
+          reasoning: false,
         });
 
       registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+      mockState.pinnedTierByProfile['balanced'] = 'high';
 
-      const model = createTestModel({
-        id: 'balanced',
-        provider: 'router',
-      });
-      const context = normalizeContext({
-        messages: [{ role: 'user', content: 'hello', timestamp: Date.now() }],
-      });
-
-      registeredProviderOptions!.streamSimple!(model, context);
-
-      await vi.waitFor(
-        () => {
-          expect(customStreamFn).toHaveBeenCalledWith(
-            expect.objectContaining({ id: 'gpt-4o-mini' }),
-            expect.anything(),
-            expect.objectContaining({ apiKey: 'test-key' }),
-          );
-          expect(streamSimple).not.toHaveBeenCalled();
-          expect(mockState.accumulatedCost).toBe(0.004);
-        },
-        { timeout: 1000 },
+      const route = await vm.route(
+        buildRequest({ thinkingLevel: 'high' as ThinkingLevel }),
+        mockState.lastExtensionContext!,
       );
+
+      expect(route.thinkingLevel).toBe('off');
+    });
+
+    it('should invoke native classifier when classifierModel is configured and accumulate classifier cost', async () => {
+      mockState.currentConfig.classifierModel = { model: 'auto' };
+      mockState.currentModelRegistry!.getAvailableOfType = vi
+        .fn()
+        .mockResolvedValue([
+          {
+            type: 'classifier',
+            id: 'jev-latest',
+            name: 'Jev Latest',
+            api: 'typesafe-system-one',
+            provider: 'typesafe',
+            baseUrl: 'https://api.typesafe.ai',
+            input: ['text'],
+            contextWindow: 32000,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ]);
+      mockState.currentModelRegistry!.classify = vi.fn().mockResolvedValue({
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        model: 'jev-latest',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {
+          input: 50,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 51,
+          cost: {
+            input: 0.0003,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.0003,
+          },
+        },
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'high',
+            probabilities: { high: 0.9, medium: 0.08, low: 0.02 },
+            confidence: 0.85,
+          },
+        },
+      });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      const route = await vm.route(
+        buildRequest(),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(route.model.id).toBe('gpt-4o');
+      expect(mockState.lastDecision?.tier).toBe('high');
+      expect(mockState.lastDecision?.isClassifier).toBe(true);
+      expect(mockState.accumulatedCost).toBeCloseTo(0.0003);
+    });
+
+    it('should downgrade high tier to medium on continuation when session budget is exceeded', async () => {
+      mockState.currentConfig.maxSessionBudget = 0.01;
+      mockState.accumulatedCost = 0.02;
+
+      const branchDecision = {
+        profile: 'balanced',
+        tier: 'high' as const,
+        phase: 'planning' as const,
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o',
+        targetLabel: 'openai/gpt-4o',
+        thinking: 'high' as ThinkingLevel,
+        reasoning: 'Planning turn',
+        timestamp: Date.now(),
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      const route = await vm.route(
+        buildRequest({
+          reason: 'continuation',
+          state: {
+            phase: 'planning',
+            tier: 'high',
+            lastDecision: branchDecision,
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(route.model.id).toBe('gpt-4o-mini');
+      expect(mockState.lastDecision?.tier).toBe('medium');
+      expect(mockState.lastDecision?.isBudgetForced).toBe(true);
+    });
+  });
+
+  describe('cost tracking helpers', () => {
+    it('should count each assistant message object only once', () => {
+      const msg = createAssistantMsg('resp', 0.012);
+      expect(extractUncountedMessageCost(msg)).toBe(0.012);
+      expect(extractUncountedMessageCost(msg)).toBe(0);
+
+      const preCounted = createAssistantMsg('old', 0.05);
+      markMessageCostCounted(preCounted);
+      expect(extractUncountedMessageCost(preCounted)).toBe(0);
     });
   });
 
@@ -890,19 +641,17 @@ describe('provider.ts', () => {
       const state: { currentModelRegistry: typeof mockRegistry | undefined } = {
         currentModelRegistry: undefined,
       };
-
-      // Set registry after 100ms
       setTimeout(() => {
         state.currentModelRegistry = mockRegistry;
-      }, 100);
+      }, 50);
 
-      const result = await waitForRegistry(state, 2000);
+      const result = await waitForRegistry(state, 1000);
       expect(result).toBe(mockRegistry);
     });
 
     it('should return undefined after timeout if registry never becomes available', async () => {
       const state = { currentModelRegistry: undefined };
-      const result = await waitForRegistry(state, 300);
+      const result = await waitForRegistry(state, 100);
       expect(result).toBeUndefined();
     });
   });

@@ -4,14 +4,14 @@ Smart per-turn model router extension for the [pi-coding-agent](https://github.c
 
 ## What it does
 
-- **Logical Router Provider**: Registers a `router` provider that exposes stable profiles (e.g., `router/balanced`) as models.
-- **Per-Turn Routing**: Intelligently chooses between `high`, `medium`, and `low` tiers for every turn based on task intent and complexity.
+- **Native Virtual Models**: Registers each profile as a Pi [virtual model](https://pi.dev/docs/latest/virtual-models) (`router/<profile>`). Selection stays on the virtual model while each assistant message records the real physical model, preserving replay safety, native footer display, per-model `/session` cost tracking, and automatic pre-request compaction when routing to smaller-context models.
+- **Per-Turn & Request-Aware Routing**: Intelligently chooses between `high`, `medium`, and `low` tiers on new user turns, stays sticky on tool-result continuations to preserve prompt caches and thinking signatures, routes background `direct` requests (like compaction summaries) cleanly, and steps through fallback chains on retries.
 - **Task-Aware Heuristics**: Detects planning vs. implementation vs. lightweight tasks using keyword analysis, word count, and conversation history.
 - **Advanced Controls**: Includes built-in support for:
-  - **LLM Intent Classifier**: Optionally use a fast model to categorize intent (overrides heuristics).
+  - **Native Classifier & LLM Intent Classification**: Supports Pi's native [classifier models](https://pi.dev/docs/latest/models#use-classifier-models) (`"auto"`, TypeSafe Jev, Cloudflare Clef, OpenAI GPT-6 Luna with image support, and `llama.cpp` decision/logprob classifiers) with probability-aware phase bias, as well as standard chat LLMs.
   - **Custom Rules**: Define keyword-based tier overrides for specific patterns (e.g., `deploy` → `high`).
   - **Cost Budgeting**: Set a session spend limit; high tier downgrades to medium once exceeded.
-  - **Fallback Chains**: Automatic retry with alternative models if the primary choice fails.
+  - **Fallback Chains**: Automatic fallback to alternative models if the primary model is unavailable, lacks credentials, or fails on retry.
 - **Phase Memory**: Biased stickiness to keep you in the same tier during multi-turn planning or implementation work.
 - **Thinking Control**: Full control over reasoning/thinking levels per tier and profile. Changing pi's thinking level (e.g. via `shift+tab`) automatically applies as an all-tier override for the active router profile.
 - **Persistent State**: Pins, profiles, costs, and debug history are remembered across agent restarts and conversation branches.
@@ -51,7 +51,8 @@ Copy the example config to one of:
 
 ```json
 {
-  "classifierModel": "google/gemini-flash-latest",
+  "$schema": "https://raw.githubusercontent.com/yeliu84/pi-model-router/main/model-router.schema.json",
+  "classifierModel": "auto",
   "maxSessionBudget": 1.0,
   "profiles": {
     "auto": {
@@ -65,14 +66,15 @@ Copy the example config to one of:
 
 ### Configuration Fields
 
-| Field              | Description                                                                                                                                                      |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `classifierModel`  | (Optional) Model used to categorize intent. Supports model aliases. If omitted, fast heuristics are used.                                                        |
-| `maxSessionBudget` | (Optional) USD budget for the session. Forces `medium` tier once exceeded.                                                                                       |
-| `phaseBias`        | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                |
-| `rules`            | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).                                                                                   |
-| `models`           | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`.                                                                       |
-| `profiles`         | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`. |
+| Field              | Description                                                                                                                                                                                                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `$schema`          | (Optional) JSON Schema URL for editor autocompletion and validation.                                                                                                                                                                                                     |
+| `classifierModel`  | (Optional) Model used to categorize intent. Supports `"auto"` (uses first available Pi native classifier such as Jev, Clef, GPT-6 Luna, or `llama.cpp`), a native classifier ID (e.g. `"typesafe/jev-latest"`), a chat LLM, or a model alias. Omit for local heuristics. |
+| `maxSessionBudget` | (Optional) USD budget for the session. Forces `medium` tier once exceeded.                                                                                                                                                                                               |
+| `phaseBias`        | (0.0 - 1.0) Stickiness of the current phase. Higher = more stable. Default `0.5`.                                                                                                                                                                                        |
+| `rules`            | List of custom keyword rules (e.g. `{ "matches": "deploy", "tier": "high" }`).                                                                                                                                                                                           |
+| `models`           | (Optional) Map of model aliases to definitions with `model`, `contextWindow`, `maxTokens`.                                                                                                                                                                               |
+| `profiles`         | Map of profile definitions, each containing optional `high`, `medium`, and `low` tiers (at least one required). Tier models can reference aliases from `models`.                                                                                                         |
 
 ### Local & Custom Models (`llama.cpp`, Ollama, LM Studio)
 

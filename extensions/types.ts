@@ -1,9 +1,31 @@
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { Api, Model, SimpleStreamOptions } from '@earendil-works/pi-ai';
+import type {
+  Api,
+  ClassifierApi,
+  ClassifierContext,
+  ClassifierModel,
+  ClassifierResult,
+  Model,
+  SimpleStreamOptions,
+} from '@earendil-works/pi-ai';
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ModelRoute,
+  ModelRouteReason,
+  ModelRouteRequest,
+  VirtualModelDefinition,
 } from '@earendil-works/pi-coding-agent';
+
+export type {
+  ClassifierApi,
+  ClassifierContext,
+  ClassifierModel,
+  ClassifierResult,
+  ModelRoute,
+  ModelRouteReason,
+  ModelRouteRequest,
+};
 
 export type RouterTier = 'high' | 'medium' | 'low';
 export type RouterPin = RouterTier | 'auto';
@@ -34,8 +56,22 @@ export type RouterModelRegistry = Pick<
   'find' | 'getApiKeyAndHeaders'
 > &
   Partial<
-    Pick<ExtensionContext['modelRegistry'], 'getRegisteredProviderConfig'>
+    Pick<
+      ExtensionContext['modelRegistry'],
+      | 'getRegisteredProviderConfig'
+      | 'hasConfiguredAuth'
+      | 'findOfType'
+      | 'getAvailableOfType'
+      | 'classify'
+      | 'streamSimple'
+    >
   >;
+
+export interface ClassifierDecisionResult {
+  tier: RouterTier;
+  reasoning: string;
+  cost?: number;
+}
 
 export type ResolvedModelRequest =
   | {
@@ -101,10 +137,30 @@ export interface RouterThinkingLevelSelectEvent {
   level: ThinkingLevel;
 }
 
+export interface VirtualRouterState {
+  phase: RouterPhase;
+  tier: RouterTier;
+  lastDecision: RoutingDecision;
+}
+
+export interface RouterVirtualModelDefinition<
+  TState = VirtualRouterState,
+  TCtx = ExtensionContext,
+> extends Omit<VirtualModelDefinition<TState>, 'route'> {
+  route(
+    request: ModelRouteRequest<TState>,
+    ctx: TCtx,
+  ): ModelRoute<TState> | Promise<ModelRoute<TState>>;
+}
+
 export interface RouterExtensionAPI<
   TCtx extends RouterExtensionContext = ExtensionContext,
 > {
-  registerProvider: ExtensionAPI['registerProvider'];
+  registerVirtualModel: (
+    model: RouterVirtualModelDefinition<VirtualRouterState, TCtx>,
+  ) => void;
+  unregisterVirtualModel?: (provider: string, id: string) => void;
+  registerProvider?: ExtensionAPI['registerProvider'];
   registerCommand: (
     name: string,
     options: {
@@ -234,4 +290,5 @@ export interface CustomSessionEntry {
   type: string;
   customType?: string;
   data?: unknown;
+  message?: unknown;
 }

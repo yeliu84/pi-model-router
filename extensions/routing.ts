@@ -2,7 +2,11 @@ import { streamSimple } from '@earendil-works/pi-ai/compat';
 import {
   normalizeContext,
   type Api,
+  type ClassifierApi,
+  type ClassifierContext,
+  type ClassifierModel,
   type Context,
+  type ImageContent,
   type Message,
   type Model,
   type SimpleStreamOptions,
@@ -17,8 +21,16 @@ import type {
   RouterThinkingByTier,
   RouterModelRegistry,
   ResolvedModelRequest,
+  ClassifierDecisionResult,
 } from './types';
-import { parseCanonicalModelRef, isRouterTier } from './config';
+import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
+
+const TIER_CRITERIA: Record<RouterTier, string> = {
+  high: 'Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, or codebase research',
+  medium:
+    'Implementation of a known plan, multi-file edits, normal coding work, focused debugging, or tests/fixes',
+  low: 'Summaries, changelogs, formatting, quick explanations, small bounded transforms, or simple read-only lookups',
+};
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -91,6 +103,19 @@ export const hasImageAttachment = (context: Context): boolean => {
   );
 };
 
+export const extractLastUserImages = (context: Context): ImageContent[] => {
+  for (let i = context.messages.length - 1; i >= 0; i--) {
+    const message = context.messages[i];
+    if (message.role === 'user') {
+      if (!Array.isArray(message.content)) return [];
+      return message.content.filter(
+        (part): part is ImageContent => part.type === 'image',
+      );
+    }
+  }
+  return [];
+};
+
 export const containsAny = (text: string, keywords: string[]): boolean => {
   return keywords.some((keyword) => text.includes(keyword));
 };
@@ -99,6 +124,12 @@ export const phaseForTier = (tier: RouterTier): RouterPhase => {
   if (tier === 'high') return 'planning';
   if (tier === 'medium') return 'implementation';
   return 'lightweight';
+};
+
+export const tierForPhase = (phase: RouterPhase): RouterTier => {
+  if (phase === 'planning') return 'high';
+  if (phase === 'implementation') return 'medium';
+  return 'low';
 };
 
 export const resolveAvailableTier = (
@@ -135,9 +166,7 @@ export const buildRoutingDecision = (
     );
   }
   const { provider, modelId } = parseCanonicalModelRef(routed.model);
-  const baseThinking =
-    routed.thinking ??
-    (tier === 'high' ? 'high' : tier === 'low' ? 'low' : 'medium');
+  const baseThinking = routed.thinking ?? tier;
   const effectiveThinking = thinkingOverrides?.[tier] ?? baseThinking;
 
   return {
@@ -465,20 +494,132 @@ export const streamWithModel = (
     : streamSimple(model, context, options);
 };
 
+export const runNativeClassifier = async (
+  classifierModelRef: string,
+  modelRegistry: RouterModelRegistry,
+  context: Context,
+  currentPhase?: RouterPhase,
+  phaseBias = 0.5,
+  signal?: AbortSignal,
+): Promise<ClassifierDecisionResult | undefined> => {
+  if (!modelRegistry.classify) return undefined;
+
+  let classifierModel: ClassifierModel<ClassifierApi> | undefined;
+  if (classifierModelRef === 'auto') {
+    if (!modelRegistry.getAvailableOfType) return undefined;
+    const available = await modelRegistry.getAvailableOfType(
+      'classifier',
+      undefined,
+      signal ? { signal } : undefined,
+    );
+    classifierModel = available[0];
+  } else {
+    if (!modelRegistry.findOfType) return undefined;
+    const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
+    classifierModel = modelRegistry.findOfType('classifier', provider, modelId);
+  }
+
+  if (!classifierModel) return undefined;
+
+  const promptText = getLastUserText(context);
+  const historyText = getRecentConversationText(context, 4);
+  const userImages = classifierModel.input?.includes('image')
+    ? extractLastUserImages(context)
+    : [];
+
+  const classifierContext: ClassifierContext = {
+    state: {
+      prompt: promptText.slice(0, 16_000),
+      ...(historyText
+        ? { recentConversation: historyText.slice(0, 8_000) }
+        : {}),
+      ...(currentPhase ? { currentPhase } : {}),
+    },
+    ...(userImages.length > 0 ? { images: userImages } : {}),
+    questions: {
+      tier: {
+        type: 'choice',
+        instructions:
+          'Categorize the software engineering work requested in `prompt` into one of the three routing tiers (`high`, `medium`, or `low`).',
+        criteria: TIER_CRITERIA,
+      },
+    },
+  };
+
+  const result = await modelRegistry.classify(
+    classifierModel,
+    classifierContext,
+    signal ? { signal } : undefined,
+  );
+  if (result.stopReason !== 'stop') return undefined;
+
+  const answer = result.answers.tier;
+  if (!answer || answer.type !== 'choice') return undefined;
+
+  let selectedTier: RouterTier | undefined = isRouterTier(answer.choice)
+    ? answer.choice
+    : undefined;
+
+  if (
+    currentPhase &&
+    phaseBias > 0 &&
+    answer.confidence < 0.25 &&
+    answer.probabilities
+  ) {
+    const phaseTier = tierForPhase(currentPhase);
+    const scoreFor = (t: RouterTier) =>
+      (answer.probabilities[t] ?? 0) + (t === phaseTier ? phaseBias * 0.15 : 0);
+    selectedTier = ROUTER_TIERS.reduce((best, t) =>
+      scoreFor(t) > scoreFor(best) ? t : best,
+    );
+  }
+
+  if (!selectedTier) return undefined;
+
+  const rawProb = answer.probabilities?.[selectedTier];
+  const probSuffix =
+    typeof rawProb === 'number'
+      ? ` (p=${Math.round(rawProb * 100)}%, conf=${Math.round(answer.confidence * 100)}%)`
+      : '';
+  const biasSuffix =
+    isRouterTier(answer.choice) && selectedTier !== answer.choice
+      ? ` [phase-biased from ${answer.choice}]`
+      : '';
+  const cost = result.usage?.cost?.total;
+
+  return {
+    tier: selectedTier,
+    reasoning: `${classifierModel.provider}/${classifierModel.id} selected ${selectedTier}${probSuffix}${biasSuffix}.`,
+    ...(typeof cost === 'number' && cost > 0 ? { cost } : {}),
+  };
+};
+
 export const runClassifier = async (
   classifierModelRef: string,
   modelRegistry: RouterModelRegistry,
   context: Context,
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
-): Promise<{ tier: RouterTier; reasoning: string } | undefined> => {
+  phaseBias = 0.5,
+  signal?: AbortSignal,
+): Promise<ClassifierDecisionResult | undefined> => {
   try {
+    // 1. Prefer Pi's native classifier models (Jev, Clef, GPT-6 Luna, llama.cpp decision/chat classifiers)
+    const nativeResult = await runNativeClassifier(
+      classifierModelRef,
+      modelRegistry,
+      context,
+      currentPhase,
+      phaseBias,
+      signal,
+    );
+    if (nativeResult) return nativeResult;
+    if (classifierModelRef === 'auto') return undefined;
+
+    // 2. Fall back to prompt-based classification on a chat LLM
     const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
     const model = modelRegistry.find(provider, modelId);
     if (!model) return undefined;
-
-    const resolved = await resolveModelRequestAuth(model, modelRegistry);
-    if (!resolved.ok) return undefined;
 
     const promptText = getLastUserText(context);
     const historyText = getRecentConversationText(context, 4);
@@ -486,9 +627,9 @@ export const runClassifier = async (
     const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
 
 Tiers:
-- high: Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, codebase research.
-- medium: Implementation of a known plan, multi-file edits, normal coding work, focused debugging, tests/fixes.
-- low: Summaries, changelogs, formatting, quick explanations, small bounded transforms, simple read-only lookup.
+- high: ${TIER_CRITERIA.high}.
+- medium: ${TIER_CRITERIA.medium}.
+- low: ${TIER_CRITERIA.low}.
 
 ${currentPhase ? `Current conversation phase: ${currentPhase}\n` : ''}
 Recent history:
@@ -513,19 +654,34 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
     const reasoningOption =
       model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
 
-    const stream = streamWithModel(
-      resolved.model,
-      classifierContext,
-      modelRegistry,
-      {
-        ...resolved.streamOptions,
+    let stream;
+    if (modelRegistry.streamSimple) {
+      stream = modelRegistry.streamSimple(model, classifierContext, {
         ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-      },
-    );
+        ...(signal ? { signal } : {}),
+      });
+    } else {
+      const resolved = await resolveModelRequestAuth(model, modelRegistry);
+      if (!resolved.ok) return undefined;
+      stream = streamWithModel(
+        resolved.model,
+        classifierContext,
+        modelRegistry,
+        {
+          ...resolved.streamOptions,
+          ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+          ...(signal ? { signal } : {}),
+        },
+      );
+    }
+
     let fullText = '';
+    let streamCost: number | undefined;
     for await (const event of stream) {
       if (event.type === 'text_delta') {
         fullText += event.delta;
+      } else if (event.type === 'done') {
+        streamCost = event.message.usage?.cost?.total;
       }
     }
 
@@ -543,10 +699,13 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
           reasoning: reasoningLine
             ? reasoningLine.split(':')[1].trim()
             : 'Classifier decision.',
+          ...(typeof streamCost === 'number' && streamCost > 0
+            ? { cost: streamCost }
+            : {}),
         };
       }
     }
-  } catch (error) {
+  } catch (_error) {
     // Ignore classifier errors and fall back to heuristics
   }
   return undefined;

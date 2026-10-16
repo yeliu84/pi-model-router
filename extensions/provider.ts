@@ -1,17 +1,5 @@
-import {
-  createAssistantMessageEventStream,
-  type Api,
-  type AssistantMessage,
-  type AssistantMessageEventStream,
-  type Context,
-  type Model,
-  type SimpleStreamOptions,
-  type Message,
-} from '@earendil-works/pi-ai';
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from '@earendil-works/pi-coding-agent';
+import type { Api, Context, Model } from '@earendil-works/pi-ai';
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RouterConfig,
@@ -21,11 +9,18 @@ import type {
   RouterThinkingByProfile,
   RouterModelRegistry,
   RouterModelCapabilityLookup,
+  VirtualRouterState,
+  RouterVirtualModelDefinition,
+  ModelRouteRequest,
+  ModelRoute,
 } from './types';
 import {
   profileNames,
   parseCanonicalModelRef,
+  isObjectRecord,
   ROUTER_TIERS,
+  THINKING_LEVELS,
+  DEFAULT_THINKING_LEVELS,
   resolveContextWindow,
   resolveMaxTokens,
   resolveThinkingLevels,
@@ -34,23 +29,53 @@ import {
 } from './config';
 import {
   phaseForTier,
+  resolveAvailableTier,
   buildRoutingDecision,
   decideRouting,
   runClassifier,
-  extractMessageText,
   hasImageAttachment,
   resolveModelRequestAuth,
-  streamWithModel,
 } from './routing';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
+
 const REGISTRY_WAIT_TIMEOUT_MS = 5000;
 const REGISTRY_WAIT_INITIAL_DELAY_MS = 50;
 const REGISTRY_WAIT_MAX_DELAY_MS = 500;
 
+const countedMessages = new WeakSet<object>();
+
+export const markMessageCostCounted = (message: unknown): void => {
+  if (isObjectRecord(message)) {
+    countedMessages.add(message);
+  }
+};
+
+export const extractUncountedMessageCost = (input: unknown): number => {
+  if (!isObjectRecord(input)) return 0;
+  const message =
+    input.role === 'assistant'
+      ? input
+      : isObjectRecord(input.message)
+        ? input.message
+        : undefined;
+  if (
+    !message ||
+    message.role !== 'assistant' ||
+    countedMessages.has(message)
+  ) {
+    return 0;
+  }
+  countedMessages.add(message);
+  const total =
+    isObjectRecord(message.usage) && isObjectRecord(message.usage.cost)
+      ? message.usage.cost.total
+      : undefined;
+  return typeof total === 'number' && total > 0 ? total : 0;
+};
+
 /**
  * Wait for the model registry to become available with exponential backoff.
- * This handles the race condition where subagents (e.g. from pi-dynamic-workflows)
- * invoke the router provider before session_start has fired in their context.
+ * Fallback for callers that invoke routing before `session_start` without a bound `ctx.modelRegistry`.
  */
 export const waitForRegistry = async <TRegistry = RouterModelRegistry>(
   state: {
@@ -68,76 +93,6 @@ export const waitForRegistry = async <TRegistry = RouterModelRegistry>(
     delay = Math.min(delay * 2, REGISTRY_WAIT_MAX_DELAY_MS);
   }
   return undefined;
-};
-
-export const createErrorMessage = (
-  model: Model<Api>,
-  message: string,
-): AssistantMessage => {
-  return {
-    role: 'assistant',
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: 'error',
-    errorMessage: message,
-    timestamp: Date.now(),
-  };
-};
-
-/**
- * Heuristic token estimator (conservative: 3 characters per token)
- */
-const estimateTokens = (text: string): number => Math.ceil(text.length / 3);
-
-/**
- * Truncate context to fit within a target token limit by removing oldest messages.
- * Always preserves the first system message and the latest user message.
- */
-const truncateContext = (context: Context, limit: number): Context => {
-  const messages = [...context.messages];
-  const nonSystemIndices = messages.reduce<number[]>((acc, m, idx) => {
-    if (m.role !== 'system') acc.push(idx);
-    return acc;
-  }, []);
-  if (nonSystemIndices.length <= 1) return context;
-
-  const systemPromptTokens = context.systemPrompt
-    ? estimateTokens(context.systemPrompt)
-    : 0;
-
-  // Pre-calculate token sizes (including sections on SystemMessage in TranscriptContext)
-  const messageTokens = messages.map((m) =>
-    estimateTokens(extractMessageText(m)),
-  );
-  let currentTokens =
-    systemPromptTokens + messageTokens.reduce((sum, t) => sum + t, 0);
-
-  if (currentTokens <= limit) return context;
-
-  const lastNonSystemIndex = nonSystemIndices[nonSystemIndices.length - 1];
-  const droppedIndices = new Set<number>();
-
-  // Drop oldest non-system messages while preserving all system messages and the latest message
-  for (const idx of nonSystemIndices) {
-    if (idx === lastNonSystemIndex || currentTokens <= limit) break;
-    currentTokens -= messageTokens[idx];
-    droppedIndices.add(idx);
-  }
-
-  const finalMessages: Message[] = messages.filter(
-    (_, idx) => !droppedIndices.has(idx),
-  );
-  return { ...context, messages: finalMessages };
 };
 
 const supportsReasoning = (
@@ -162,46 +117,452 @@ const supportsReasoning = (
   return false;
 };
 
-export const registerRouterProvider = <
-  TContext extends {
-    ui: { setHiddenThinkingLabel?: (label?: string) => void };
-  } = ExtensionContext,
->(
-  pi: Pick<ExtensionAPI, 'registerProvider'>,
-  state: {
-    lastRegisteredModels: string;
-    readonly currentConfig: RouterConfig;
-    readonly currentModelRegistry: RouterModelRegistry | undefined;
-    readonly lastExtensionContext: TContext | undefined;
-    selectedProfile: string | undefined;
-    routerEnabled: boolean;
-    lastDecision: RoutingDecision | undefined;
-    readonly thinkingByProfile: RouterThinkingByProfile;
-    readonly pinnedTierByProfile: RouterPinByProfile;
-    accumulatedCost: number;
-    /** Override for the registry wait timeout (for testing). */
-    readonly registryTimeoutMs?: number;
-  },
-  actions: {
-    persistState: () => void;
-    recordDebugDecision: (decision: RoutingDecision) => void;
-    getThinkingOverride: (
-      profileName: string,
+export interface RouterProviderState<TContext = ExtensionContext> {
+  lastRegisteredModels: string;
+  readonly currentConfig: RouterConfig;
+  readonly currentModelRegistry: RouterModelRegistry | undefined;
+  readonly lastExtensionContext: TContext | undefined;
+  selectedProfile: string | undefined;
+  routerEnabled: boolean;
+  lastDecision: RoutingDecision | undefined;
+  readonly thinkingByProfile: RouterThinkingByProfile;
+  readonly pinnedTierByProfile: RouterPinByProfile;
+  accumulatedCost: number;
+  /** Override for the registry wait timeout (for testing). */
+  readonly registryTimeoutMs?: number;
+}
+
+export interface RouterProviderActions<TContext = ExtensionContext> {
+  persistState: () => void;
+  recordDebugDecision: (decision: RoutingDecision) => void;
+  getThinkingOverride: (
+    profileName: string,
+    tier: RouterTier,
+  ) => ThinkingLevel | undefined;
+  updateStatus: (ctx: TContext) => void;
+  syncPiThinkingLevel: (level: ThinkingLevel) => void;
+}
+
+export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
+  request: ModelRouteRequest<VirtualRouterState>,
+  ctx: TContext | undefined,
+  state: RouterProviderState<TContext>,
+  actions: RouterProviderActions<TContext>,
+): Promise<ModelRoute<VirtualRouterState>> => {
+  try {
+    const ctxRegistry =
+      ctx &&
+      typeof ctx === 'object' &&
+      'modelRegistry' in ctx &&
+      ctx.modelRegistry
+        ? (ctx.modelRegistry as RouterModelRegistry)
+        : undefined;
+    const registry =
+      ctxRegistry ?? (await waitForRegistry(state, state.registryTimeoutMs));
+    if (!registry) {
+      throw new Error(
+        'Router provider initialization timed out. session_start may not have fired.',
+      );
+    }
+
+    const profileName = request.model.id;
+    const profile = state.currentConfig.profiles[profileName];
+    if (!profile) {
+      throw new Error(`Unknown router profile: ${profileName}`);
+    }
+
+    const resolveCandidate = async (
+      modelRef: string,
+    ): Promise<
+      | {
+          ok: true;
+          model: Model<Api>;
+          provider: string;
+          modelId: string;
+        }
+      | {
+          ok: false;
+          error: string;
+        }
+    > => {
+      const { provider, modelId } = parseCanonicalModelRef(modelRef);
+      if (provider === 'router') {
+        return {
+          ok: false,
+          error: `Invalid routed target "${modelRef}": cannot route to virtual router provider.`,
+        };
+      }
+      const targetModel = registry.find(provider, modelId);
+      if (!targetModel) {
+        return {
+          ok: false,
+          error: `Routed model not found: ${provider}/${modelId}`,
+        };
+      }
+      if (
+        registry.hasConfiguredAuth &&
+        !registry.hasConfiguredAuth(targetModel)
+      ) {
+        return {
+          ok: false,
+          error: `No configured credentials for routed model: ${provider}/${modelId}`,
+        };
+      }
+      const resolvedAuth = await resolveModelRequestAuth(targetModel, registry);
+      if (!resolvedAuth.ok) {
+        return { ok: false, error: resolvedAuth.error };
+      }
+      return {
+        ok: true,
+        model: resolvedAuth.model,
+        provider,
+        modelId,
+      };
+    };
+
+    const resolveFirstAvailableModel = async (candidates: string[]) => {
+      let lastError: unknown;
+      for (let i = 0; i < candidates.length; i++) {
+        const modelRef = candidates[i];
+        const resolved = await resolveCandidate(modelRef);
+        if (!resolved.ok) {
+          lastError = new Error(resolved.error);
+          continue;
+        }
+        return { ...resolved, modelRef, index: i };
+      }
+      throw lastError instanceof Error
+        ? lastError
+        : new Error(
+            typeof lastError === 'string'
+              ? lastError
+              : 'Failed to resolve any model in the routing chain.',
+          );
+    };
+
+    const resolveDelegatedThinking = (
       tier: RouterTier,
-    ) => ThinkingLevel | undefined;
-    updateStatus: (ctx: TContext) => void;
-    syncPiThinkingLevel: (level: ThinkingLevel) => void;
+      baseThinking: ThinkingLevel,
+      targetModel: Model<Api>,
+    ): {
+      effectiveThinking: ThinkingLevel;
+      delegatedThinking: ThinkingLevel;
+    } => {
+      const effectiveThinking =
+        actions.getThinkingOverride(profileName, tier) ?? baseThinking;
+      const clamped = clampThinkingLevel(
+        effectiveThinking,
+        resolveThinkingLevels(tier, profile, registry),
+      );
+      const delegatedThinking: ThinkingLevel =
+        targetModel.reasoning && clamped !== 'off' ? clamped : 'off';
+      return { effectiveThinking, delegatedThinking };
+    };
+
+    const pinnedTier = state.pinnedTierByProfile[profileName];
+    const previousDecision =
+      request.state?.lastDecision?.profile === profileName
+        ? request.state.lastDecision
+        : state.lastDecision?.profile === profileName
+          ? state.lastDecision
+          : undefined;
+
+    // Direct requests (e.g. compaction summaries) route cleanly without mutating session state.
+    // Prefer the currently active model (from previous decision) to preserve the session's
+    // prompt cache, falling back to pinned tier or medium only if no active model exists.
+    if (request.reason === 'direct') {
+      const directTier = resolveAvailableTier(
+        profile,
+        pinnedTier ?? previousDecision?.tier ?? 'medium',
+      );
+      const tierConfig = profile[directTier]!;
+      const preferredModel =
+        previousDecision?.tier === directTier
+          ? previousDecision.targetLabel
+          : undefined;
+      const candidates = [
+        ...new Set([
+          ...(preferredModel ? [preferredModel] : []),
+          tierConfig.model,
+          ...(tierConfig.fallbacks ?? []),
+        ]),
+      ];
+      const resolved = await resolveFirstAvailableModel(candidates);
+      const { delegatedThinking } = resolveDelegatedThinking(
+        directTier,
+        tierConfig.thinking ?? directTier,
+        resolved.model,
+      );
+      return {
+        model: resolved.model,
+        thinkingLevel: delegatedThinking,
+      };
+    }
+
+    // Account for any completed assistant responses not yet recorded.
+    for (const msg of request.messages) {
+      if (msg.role === 'assistant') {
+        state.accumulatedCost += extractUncountedMessageCost(msg);
+      }
+    }
+    if (request.failed?.message) {
+      state.accumulatedCost += extractUncountedMessageCost(
+        request.failed.message,
+      );
+    }
+
+    state.selectedProfile = profileName;
+    state.routerEnabled = true;
+
+    const isBudgetExceeded =
+      state.currentConfig.maxSessionBudget !== undefined &&
+      state.accumulatedCost >= state.currentConfig.maxSessionBudget;
+
+    const context: Context = { messages: [...request.messages] };
+    const lastMessage = request.messages.findLast((m) => m.role !== 'system');
+    const isContinuation =
+      request.reason === 'continuation' ||
+      (request.reason !== 'retry' && lastMessage?.role === 'toolResult');
+    const hasChangedPinOnContinuation =
+      isContinuation &&
+      pinnedTier !== undefined &&
+      pinnedTier !== previousDecision?.tier;
+
+    let decision: RoutingDecision;
+
+    if (
+      (isContinuation || request.reason === 'retry') &&
+      previousDecision &&
+      !hasChangedPinOnContinuation
+    ) {
+      if (isBudgetExceeded && previousDecision.tier === 'high') {
+        const downgradedTier = resolveAvailableTier(profile, 'medium');
+        decision = buildRoutingDecision(
+          profileName,
+          profile,
+          downgradedTier,
+          phaseForTier(downgradedTier),
+          `Budget exceeded. Downgraded from high to ${downgradedTier} tier. (Original: ${previousDecision.reasoning})`,
+          state.thinkingByProfile[profileName],
+          previousDecision.isClassifier,
+        );
+        decision.isBudgetForced = true;
+      } else {
+        decision = {
+          ...previousDecision,
+          timestamp: Date.now(),
+          reasoning:
+            isContinuation &&
+            !previousDecision.reasoning.startsWith('Preserved ')
+              ? `Preserved ${previousDecision.targetLabel} for tool-result continuation ` +
+                `to maintain prompt cache and thinking state. (Original: ${previousDecision.reasoning})`
+              : previousDecision.reasoning,
+        };
+      }
+    } else {
+      decision = decideRouting(
+        context,
+        profileName,
+        profile,
+        previousDecision,
+        pinnedTier,
+        state.thinkingByProfile[profileName],
+        state.currentConfig.phaseBias,
+        state.currentConfig.rules,
+        isBudgetExceeded,
+      );
+
+      // Classifier Override — skip when pinned, rule-matched, or budget exceeded.
+      if (
+        !isContinuation &&
+        state.currentConfig.classifierModel &&
+        !pinnedTier &&
+        !decision.isRuleMatched &&
+        !isBudgetExceeded
+      ) {
+        const classifierResult = await runClassifier(
+          state.currentConfig.classifierModel.model,
+          registry,
+          context,
+          previousDecision?.phase,
+          state.currentConfig.classifierModel.thinking,
+          state.currentConfig.phaseBias,
+          request.signal,
+        );
+        if (classifierResult?.cost) {
+          state.accumulatedCost += classifierResult.cost;
+        }
+        if (classifierResult) {
+          const classifiedTier = resolveAvailableTier(
+            profile,
+            classifierResult.tier,
+          );
+          decision = buildRoutingDecision(
+            profileName,
+            profile,
+            classifiedTier,
+            phaseForTier(classifiedTier),
+            `Classifier: ${classifierResult.reasoning}`,
+            state.thinkingByProfile[profileName],
+            true,
+          );
+        }
+      }
+    }
+
+    const imageAttached = hasImageAttachment(context);
+    const checkModelSupportsImage = (modelRef: string) => {
+      try {
+        const { provider, modelId } = parseCanonicalModelRef(modelRef);
+        const m = registry.find(provider, modelId);
+        return m?.input?.includes('image') ?? false;
+      } catch {
+        return false;
+      }
+    };
+
+    if (imageAttached) {
+      const tierModels = [
+        decision.targetLabel,
+        ...(profile[decision.tier]?.fallbacks ?? []),
+      ];
+      if (!tierModels.some(checkModelSupportsImage)) {
+        const tiersToTry: RouterTier[] =
+          decision.tier === 'low'
+            ? ['medium', 'high']
+            : decision.tier === 'medium'
+              ? ['high']
+              : [];
+
+        let foundTier: RouterTier | undefined;
+        for (const t of tiersToTry) {
+          const tierConfig = profile[t];
+          if (!tierConfig) continue;
+          const tModels = [tierConfig.model, ...(tierConfig.fallbacks ?? [])];
+          if (tModels.some(checkModelSupportsImage)) {
+            foundTier = t;
+            break;
+          }
+        }
+
+        if (foundTier) {
+          decision = buildRoutingDecision(
+            profileName,
+            profile,
+            foundTier,
+            phaseForTier(foundTier),
+            `Forced ${foundTier} tier because the originally routed ${decision.tier} tier does not support image attachments.`,
+            state.thinkingByProfile[profileName],
+            false,
+          );
+        }
+      }
+    }
+
+    let modelsToTry = [
+      ...new Set([
+        decision.targetLabel,
+        ...(profile[decision.tier]?.fallbacks ?? []),
+      ]),
+    ];
+    if (imageAttached) {
+      modelsToTry = modelsToTry.filter(checkModelSupportsImage);
+      if (modelsToTry.length === 0) {
+        modelsToTry = [decision.targetLabel];
+      }
+    }
+
+    // On retry, rotate candidates so models after the failed model are attempted first.
+    if (request.reason === 'retry' && request.failed?.model) {
+      const failedRef = `${request.failed.model.provider}/${request.failed.model.id}`;
+      const failedIdx = modelsToTry.indexOf(failedRef);
+      if (failedIdx !== -1 && modelsToTry.length > 1) {
+        modelsToTry = [
+          ...modelsToTry.slice(failedIdx + 1),
+          ...modelsToTry.slice(0, failedIdx + 1),
+        ];
+      }
+    }
+
+    const resolved = await resolveFirstAvailableModel(modelsToTry);
+    const selectedModel = resolved.model;
+    if (resolved.modelRef !== decision.targetLabel || resolved.index > 0) {
+      const originalTarget = decision.targetLabel;
+      decision = {
+        ...decision,
+        targetProvider: resolved.provider,
+        targetModelId: resolved.modelId,
+        targetLabel: resolved.modelRef,
+        isFallback: true,
+        reasoning:
+          request.reason === 'retry' && request.failed
+            ? `Fallback to ${resolved.modelRef} after ${request.failed.model.provider}/${request.failed.model.id} failed${request.failed.message.errorMessage ? ` (${request.failed.message.errorMessage})` : ''}. (Original: ${decision.reasoning})`
+            : resolved.modelRef !== originalTarget
+              ? `Fallback to ${resolved.modelRef} because ${originalTarget} was unavailable. (Original: ${decision.reasoning})`
+              : decision.reasoning,
+      };
+    }
+
+    const { effectiveThinking, delegatedThinking } = resolveDelegatedThinking(
+      decision.tier,
+      decision.thinking,
+      selectedModel,
+    );
+
+    decision = {
+      ...decision,
+      thinking: effectiveThinking,
+    };
+
+    state.lastDecision = decision;
+    actions.recordDebugDecision(decision);
+
+    const effectiveCtx = ctx ?? state.lastExtensionContext;
+    try {
+      actions.syncPiThinkingLevel(effectiveThinking);
+      if (effectiveCtx) {
+        actions.updateStatus(effectiveCtx);
+      }
+    } catch {
+      // Stale extension context — skip non-critical UI updates.
+    }
+
+    return {
+      model: selectedModel,
+      thinkingLevel: delegatedThinking,
+      state: {
+        phase: decision.phase,
+        tier: decision.tier,
+        lastDecision: decision,
+      },
+    };
+  } finally {
+    try {
+      actions.persistState();
+    } catch {
+      // Ignore: extension context may be stale after session teardown.
+    }
+  }
+};
+
+export const registerRouterProvider = <TContext = ExtensionContext>(
+  pi: {
+    registerVirtualModel: (
+      model: RouterVirtualModelDefinition<VirtualRouterState, TContext>,
+    ) => void;
+    unregisterVirtualModel?: (provider: string, id: string) => void;
   },
+  state: RouterProviderState<TContext>,
+  actions: RouterProviderActions<TContext>,
 ) => {
   const profileList = profileNames(state.currentConfig);
 
-  // Map profiles to their capacities
   const modelDefinitions = profileList.map((name) => {
     const profile = state.currentConfig.profiles[name];
 
-    // Report the MAX context window and max output tokens across all tiers.
-    // The honesty check + truncateContext handles the case where the
-    // actually routed model is smaller.
+    // Report the MAX context window and max output tokens across all tiers
+    // before the first response. Afterwards, Pi uses the physical model's limits
+    // and auto-compacts before sending if the routed model's context is smaller.
     let maxContextWindow = DEFAULT_CONTEXT_WINDOW;
     let maxMaxTokens = DEFAULT_MAX_TOKENS;
     for (const tier of ROUTER_TIERS) {
@@ -221,389 +582,60 @@ export const registerRouterProvider = <
       profile,
       state.currentModelRegistry,
     );
-    // Build thinkingLevelMap from the union of all tier models' declared levels.
-    // Only needed if xhigh or max are in the set (pi supports all others by default).
-    let thinkingLevelMap: Record<string, string> | undefined;
-    if (hasReasoning) {
-      const map: Record<string, string> = {};
-      if (profileLevels.has('xhigh')) map.xhigh = 'xhigh';
-      if (profileLevels.has('max')) map.max = 'max';
-      if (Object.keys(map).length > 0) thinkingLevelMap = map;
-    }
+    const thinkingLevels: ThinkingLevel[] = hasReasoning
+      ? THINKING_LEVELS.filter(
+          (level) =>
+            level === 'off' ||
+            profileLevels.has(level) ||
+            (profileLevels.size === 0 &&
+              DEFAULT_THINKING_LEVELS.includes(level)),
+        )
+      : ['off'];
 
     return {
       id: name,
       name: `Router ${name}`,
       reasoning: hasReasoning,
-      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      thinkingLevels,
       input: ['text', 'image'] as ('text' | 'image')[],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: maxContextWindow,
       maxTokens: maxMaxTokens,
     };
   });
 
   const modelsKey = modelDefinitions
-    .map((m) => `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.reasoning}`)
+    .map(
+      (m) =>
+        `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.reasoning}:${m.thinkingLevels.join('|')}`,
+    )
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;
 
-  pi.registerProvider('router', {
-    baseUrl: 'router://local',
-    apiKey: 'pi-model-router',
-    api: 'router-local-api',
-    models: modelDefinitions,
-    streamSimple: (
-      model: Model<Api>,
-      context: Context,
-      options?: SimpleStreamOptions,
-    ): AssistantMessageEventStream => {
-      const stream = createAssistantMessageEventStream();
+  const previousIds = state.lastRegisteredModels
+    ? state.lastRegisteredModels
+        .split(',')
+        .map((entry) => entry.split(':')[0])
+        .filter(Boolean)
+    : [];
+  for (const prevId of previousIds) {
+    if (!profileList.includes(prevId)) {
+      pi.unregisterVirtualModel?.('router', prevId);
+    }
+  }
 
-      (async () => {
-        try {
-          // Wait for the router to be fully initialized (session_start sets currentModelRegistry).
-          // This handles the race where subagents (e.g. from pi-dynamic-workflows) invoke
-          // the router provider before session_start has fired in their context.
-          const registry = await waitForRegistry(
-            state,
-            state.registryTimeoutMs,
-          );
-          if (!registry) {
-            throw new Error(
-              'Router provider initialization timed out. session_start may not have fired.',
-            );
-          }
-          const profile = state.currentConfig.profiles[model.id];
-          if (!profile) {
-            throw new Error(`Unknown router profile: ${model.id}`);
-          }
-
-          state.selectedProfile = model.id;
-          state.routerEnabled = true;
-
-          const pinnedTier = state.pinnedTierByProfile[model.id];
-          const isBudgetExceeded =
-            state.currentConfig.maxSessionBudget !== undefined &&
-            state.accumulatedCost >= state.currentConfig.maxSessionBudget;
-
-          let decision: RoutingDecision = decideRouting(
-            context,
-            model.id,
-            profile,
-            state.lastDecision,
-            pinnedTier,
-            state.thinkingByProfile[model.id],
-            state.currentConfig.phaseBias,
-            state.currentConfig.rules,
-            isBudgetExceeded,
-          );
-
-          // Classifier Override — skip when budget is already exceeded since the
-          // result would be downgraded anyway, saving an unnecessary LLM call.
-          if (
-            state.currentConfig.classifierModel &&
-            !pinnedTier &&
-            !decision.isRuleMatched &&
-            !isBudgetExceeded
-          ) {
-            const classifierResult = await runClassifier(
-              state.currentConfig.classifierModel.model,
-              registry,
-              context,
-              state.lastDecision?.phase,
-              state.currentConfig.classifierModel.thinking,
-            );
-            if (classifierResult) {
-              decision = buildRoutingDecision(
-                model.id,
-                profile,
-                classifierResult.tier,
-                phaseForTier(classifierResult.tier),
-                `Classifier: ${classifierResult.reasoning}`,
-                state.thinkingByProfile[model.id],
-                true,
-              );
-            }
-          }
-
-          const lastMessage = context.messages.findLast(
-            (m) => m.role !== 'system',
-          );
-          const previousDecision = state.lastDecision;
-          const isGoogleThinkingToolContinuation =
-            lastMessage?.role === 'toolResult' &&
-            previousDecision?.profile === model.id &&
-            previousDecision.targetProvider === 'google' &&
-            previousDecision.thinking !== 'off' &&
-            decision.targetProvider === 'google' &&
-            decision.thinking !== 'off' &&
-            previousDecision.targetLabel !== decision.targetLabel;
-
-          if (isGoogleThinkingToolContinuation && previousDecision) {
-            decision = {
-              ...decision,
-              tier: previousDecision.tier,
-              phase: previousDecision.phase,
-              targetProvider: previousDecision.targetProvider,
-              targetModelId: previousDecision.targetModelId,
-              targetLabel: previousDecision.targetLabel,
-              thinking: previousDecision.thinking,
-              reasoning:
-                `Preserved ${previousDecision.targetLabel} for a Google tool-result continuation ` +
-                `to avoid thought-signature replay errors. (Original: ${decision.reasoning})`,
-            };
-          }
-
-          const imageAttached = hasImageAttachment(context);
-          const checkModelSupportsImage = (modelRef: string) => {
-            try {
-              const { provider, modelId } = parseCanonicalModelRef(modelRef);
-              const m = registry.find(provider, modelId);
-              return m?.input?.includes('image') ?? false;
-            } catch {
-              return false;
-            }
-          };
-
-          if (imageAttached) {
-            const tierModels = [
-              decision.targetLabel,
-              ...(profile[decision.tier]?.fallbacks ?? []),
-            ];
-            if (!tierModels.some(checkModelSupportsImage)) {
-              const tiersToTry: RouterTier[] =
-                decision.tier === 'low'
-                  ? ['medium', 'high']
-                  : decision.tier === 'medium'
-                    ? ['high']
-                    : [];
-
-              let foundTier: RouterTier | undefined;
-              for (const t of tiersToTry) {
-                const tierConfig = profile[t];
-                if (!tierConfig) continue;
-                const tModels = [
-                  tierConfig.model,
-                  ...(tierConfig.fallbacks ?? []),
-                ];
-                if (tModels.some(checkModelSupportsImage)) {
-                  foundTier = t;
-                  break;
-                }
-              }
-
-              if (foundTier) {
-                decision = buildRoutingDecision(
-                  model.id,
-                  profile,
-                  foundTier,
-                  phaseForTier(foundTier),
-                  `Forced ${foundTier} tier because the originally routed ${decision.tier} tier does not support image attachments.`,
-                  state.thinkingByProfile[model.id],
-                  false,
-                );
-              }
-            }
-          }
-
-          state.lastDecision = decision;
-          actions.recordDebugDecision(decision);
-
-          // Sync pi's thinking level display with the router's effective thinking.
-          // Wrapped in try/catch: in subagent contexts the extension runtime
-          // may be invalidated (stale) after session teardown.
-          const effectiveThinking =
-            actions.getThinkingOverride(model.id, decision.tier) ??
-            decision.thinking;
-          try {
-            actions.syncPiThinkingLevel(effectiveThinking);
-            if (state.lastExtensionContext) {
-              actions.updateStatus(state.lastExtensionContext);
-            }
-          } catch {
-            // Stale extension context — skip non-critical UI updates.
-          }
-
-          let modelsToTry = [
-            ...new Set([
-              decision.targetLabel,
-              ...(profile[decision.tier]?.fallbacks ?? []),
-            ]),
-          ];
-          if (imageAttached) {
-            modelsToTry = modelsToTry.filter(checkModelSupportsImage);
-            if (modelsToTry.length === 0) {
-              modelsToTry = [decision.targetLabel];
-            }
-          }
-          let lastError: unknown;
-          let success = false;
-
-          for (let i = 0; i < modelsToTry.length; i++) {
-            const modelRef = modelsToTry[i];
-            const { provider: targetProvider, modelId: targetModelId } =
-              parseCanonicalModelRef(modelRef);
-
-            if (targetProvider === 'router') continue;
-
-            const targetModel = registry.find(targetProvider, targetModelId);
-            if (!targetModel) {
-              lastError = new Error(
-                `Routed model not found: ${targetProvider}/${targetModelId}`,
-              );
-              continue;
-            }
-
-            const resolved = await resolveModelRequestAuth(
-              targetModel,
-              registry,
-            );
-            if (!resolved.ok) {
-              lastError = new Error(resolved.error);
-              continue;
-            }
-
-            try {
-              // HONESTY CHECK & AUTO-TRUNCATION
-              // If the picked model has a smaller context than what we reported, truncate now.
-              let effectiveContext = context;
-              const targetLimit = resolveContextWindow(
-                decision.tier,
-                profile,
-                registry,
-              );
-              if (targetLimit < model.contextWindow!) {
-                effectiveContext = truncateContext(context, targetLimit);
-              }
-
-              const thinkingOverride = actions.getThinkingOverride(
-                model.id,
-                decision.tier,
-              );
-              const requestedReasoning = clampThinkingLevel(
-                thinkingOverride ?? decision.thinking,
-                resolveThinkingLevels(decision.tier, profile, registry),
-              );
-
-              const delegatedReasoning: SimpleStreamOptions['reasoning'] =
-                targetModel.reasoning && requestedReasoning !== 'off'
-                  ? requestedReasoning
-                  : undefined;
-
-              try {
-                if (state.lastExtensionContext) {
-                  if (delegatedReasoning) {
-                    state.lastExtensionContext.ui.setHiddenThinkingLabel?.(
-                      `Thinking (${targetProvider}/${targetModelId})...`,
-                    );
-                  } else {
-                    state.lastExtensionContext.ui.setHiddenThinkingLabel?.();
-                  }
-                }
-              } catch {
-                // Stale extension context — skip non-critical UI updates.
-              }
-
-              // Strip pi's reasoning from options — the router controls thinking
-              const { reasoning: _piReasoning, ...delegationOptions } =
-                options ?? {};
-
-              const delegatedStream = streamWithModel(
-                resolved.model,
-                effectiveContext,
-                registry,
-                {
-                  ...delegationOptions,
-                  ...resolved.streamOptions,
-                  ...(delegatedReasoning
-                    ? { reasoning: delegatedReasoning }
-                    : {}),
-                },
-              );
-
-              let contentReceived = false;
-              for await (const event of delegatedStream) {
-                if (event.type === 'done') {
-                  const cost = event.message.usage?.cost?.total ?? 0;
-                  state.accumulatedCost += cost;
-                }
-                if (event.type === 'error' && !contentReceived) {
-                  const errorMessage =
-                    'error' in event &&
-                    event.error &&
-                    typeof event.error === 'object' &&
-                    'errorMessage' in event.error &&
-                    typeof event.error.errorMessage === 'string'
-                      ? event.error.errorMessage
-                      : undefined;
-                  throw new Error(
-                    errorMessage || 'Model failed before sending content.',
-                  );
-                }
-                const isContent =
-                  event.type === 'text_delta' ||
-                  event.type === 'thinking_delta' ||
-                  event.type === 'toolcall_delta' ||
-                  event.type === 'toolcall_end';
-                if (isContent) contentReceived = true;
-                stream.push(event);
-              }
-              success = true;
-              if (i > 0) decision.isFallback = true;
-              break;
-            } catch (err) {
-              lastError = err;
-            }
-          }
-
-          if (!success) {
-            throw lastError instanceof Error
-              ? lastError
-              : new Error(
-                  typeof lastError === 'string'
-                    ? lastError
-                    : 'Failed to delegate to any model in the chain.',
-                );
-          }
-
-          stream.end();
-        } catch (error) {
-          // When a subagent session is torn down (e.g. by pi-dynamic-workflows),
-          // the extension runtime is invalidated and any pi/ctx call throws a
-          // stale-context error. Push a graceful done event so the stream's
-          // result() promise resolves (required by AssistantMessageEventStream).
-          const isStaleCtx =
-            error instanceof Error && error.message.includes('stale');
-          if (isStaleCtx) {
-            stream.push({
-              type: 'done',
-              reason: 'stop',
-              message: createErrorMessage(model, ''),
-            });
-          } else {
-            stream.push({
-              type: 'error',
-              reason: 'error',
-              error: createErrorMessage(
-                model,
-                error instanceof Error ? error.message : String(error),
-              ),
-            });
-          }
-          stream.end();
-        } finally {
-          try {
-            actions.persistState();
-          } catch {
-            // Ignore: extension context may be stale after session teardown.
-          }
-        }
-      })();
-
-      return stream;
-    },
-  });
+  for (const def of modelDefinitions) {
+    pi.registerVirtualModel({
+      provider: 'router',
+      id: def.id,
+      name: def.name,
+      thinkingLevels: def.thinkingLevels,
+      contextWindow: def.contextWindow,
+      maxTokens: def.maxTokens,
+      input: def.input,
+      route: (request, ctx) =>
+        routeVirtualModelRequest(request, ctx, state, actions),
+    });
+  }
 
   state.lastRegisteredModels = modelsKey;
 };

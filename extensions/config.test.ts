@@ -619,6 +619,37 @@ describe('config.ts', () => {
       };
       expect(getUnsupportedTiers(profile, 'max', registry)).toEqual(['medium']);
     });
+
+    it('should report tiers whose model disallows off via thinkingLevelMap.off === null', () => {
+      const profile: RouterProfile = {
+        high: { model: 'openai/gpt-6.1-sol' },
+        medium: { model: 'anthropic/claude-haiku-5-5' },
+      };
+      const registry: RouterModelCapabilityLookup = {
+        find: (_provider, modelId) =>
+          modelId === 'gpt-6.1-sol'
+            ? {
+                reasoning: true,
+                thinkingLevelMap: {
+                  off: null,
+                  minimal: null,
+                  low: 'low',
+                  medium: 'medium',
+                  high: 'high',
+                },
+              }
+            : {
+                reasoning: true,
+                thinkingLevelMap: {
+                  minimal: null,
+                  low: 'low',
+                  medium: 'medium',
+                  high: 'high',
+                },
+              },
+      };
+      expect(getUnsupportedTiers(profile, 'off', registry)).toEqual(['high']);
+    });
   });
 
   describe('clampThinkingLevel', () => {
@@ -630,6 +661,22 @@ describe('config.ts', () => {
         clampThinkingLevel('max', ['low', 'medium', 'high', 'xhigh']),
       ).toBe('xhigh');
       expect(clampThinkingLevel('max', ['low', 'medium', 'high'])).toBe('high');
+    });
+
+    it('should clamp upwards when requested level is below minimum supported reasoning level (e.g. Xiaomi MiMo or Claude 5.5)', () => {
+      expect(clampThinkingLevel('minimal', ['low', 'medium', 'high'])).toBe(
+        'low',
+      );
+      expect(clampThinkingLevel('medium', ['high'])).toBe('high');
+    });
+
+    it('should clamp off to lowest supported level when allowOff is false', () => {
+      expect(clampThinkingLevel('off', ['low', 'medium', 'high'], false)).toBe(
+        'low',
+      );
+      expect(clampThinkingLevel('off', ['low', 'medium', 'high'], true)).toBe(
+        'off',
+      );
     });
   });
 

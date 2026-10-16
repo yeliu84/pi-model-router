@@ -614,6 +614,28 @@ describe('provider.ts (virtual models)', () => {
       expect(mockState.lastDecision?.tier).toBe('medium');
       expect(mockState.lastDecision?.isBudgetForced).toBe(true);
     });
+
+    it('should infer previous decision from request.previous when branch state is absent', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      const prevModel = createTestModel({
+        provider: 'openai',
+        id: 'gpt-4o',
+        reasoning: true,
+      });
+
+      const directRoute = await vm.route(
+        buildRequest({
+          reason: 'direct',
+          previous: { model: prevModel, thinkingLevel: 'high' },
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(directRoute.model.id).toBe('gpt-4o');
+      expect(directRoute.thinkingLevel).toBe('high');
+    });
   });
 
   describe('cost tracking helpers', () => {

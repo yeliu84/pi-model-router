@@ -180,7 +180,7 @@ export interface RouterExtensionAPI<
   setThinkingLevel: ExtensionAPI['setThinkingLevel'];
   appendEntry: ExtensionAPI['appendEntry'];
   on(
-    event: 'session_start' | 'turn_start' | 'turn_end',
+    event: 'session_start' | 'session_tree' | 'turn_start' | 'turn_end',
     handler: (event: unknown, ctx: TCtx) => Promise<void> | void,
   ): void;
   on(

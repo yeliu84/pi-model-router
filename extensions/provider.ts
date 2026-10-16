@@ -117,6 +117,53 @@ const supportsReasoning = (
   return false;
 };
 
+const getTierModels = (
+  profile: RouterConfig['profiles'][string],
+  tier: RouterTier,
+  preferredModel?: string,
+): string[] => {
+  const tierConfig = profile[tier];
+  if (!tierConfig) return preferredModel ? [preferredModel] : [];
+  return [
+    ...new Set([
+      ...(preferredModel ? [preferredModel] : []),
+      tierConfig.model,
+      ...(tierConfig.fallbacks ?? []),
+    ]),
+  ];
+};
+
+const inferDecisionFromPrevious = (
+  profileName: string,
+  profile: RouterConfig['profiles'][string],
+  previous: ModelRouteRequest<VirtualRouterState>['previous'],
+  thinkingOverrides?: RouterThinkingByProfile[string],
+): RoutingDecision | undefined => {
+  if (!previous) return undefined;
+  const targetRef = `${previous.model.provider}/${previous.model.id}`;
+  const tier = ROUTER_TIERS.find((t) =>
+    getTierModels(profile, t).includes(targetRef),
+  );
+  if (!tier) return undefined;
+  const decision = buildRoutingDecision(
+    profileName,
+    profile,
+    tier,
+    phaseForTier(tier),
+    `Inferred ${tier} tier from previous response (${targetRef}).`,
+    thinkingOverrides,
+  );
+  return {
+    ...decision,
+    targetProvider: previous.model.provider,
+    targetModelId: previous.model.id,
+    targetLabel: targetRef,
+    thinking:
+      thinkingOverrides?.[tier] ?? previous.thinkingLevel ?? decision.thinking,
+    ...(profile[tier]?.model !== targetRef ? { isFallback: true } : {}),
+  };
+};
+
 export interface RouterProviderState<TContext = ExtensionContext> {
   lastRegisteredModels: string;
   readonly currentConfig: RouterConfig;
@@ -252,7 +299,8 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         actions.getThinkingOverride(profileName, tier) ?? baseThinking;
       const clamped = clampThinkingLevel(
         effectiveThinking,
-        resolveThinkingLevels(tier, profile, registry),
+        resolveThinkingLevels(tier, profile, registry, targetModel),
+        targetModel.thinkingLevelMap?.off !== null,
       );
       const delegatedThinking: ThinkingLevel =
         targetModel.reasoning && clamped !== 'off' ? clamped : 'off';
@@ -265,7 +313,12 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         ? request.state.lastDecision
         : state.lastDecision?.profile === profileName
           ? state.lastDecision
-          : undefined;
+          : inferDecisionFromPrevious(
+              profileName,
+              profile,
+              request.previous,
+              state.thinkingByProfile[profileName],
+            );
 
     // Direct requests (e.g. compaction summaries) route cleanly without mutating session state.
     // Prefer the currently active model (from previous decision) to preserve the session's
@@ -276,17 +329,13 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         pinnedTier ?? previousDecision?.tier ?? 'medium',
       );
       const tierConfig = profile[directTier]!;
-      const preferredModel =
+      const candidates = getTierModels(
+        profile,
+        directTier,
         previousDecision?.tier === directTier
           ? previousDecision.targetLabel
-          : undefined;
-      const candidates = [
-        ...new Set([
-          ...(preferredModel ? [preferredModel] : []),
-          tierConfig.model,
-          ...(tierConfig.fallbacks ?? []),
-        ]),
-      ];
+          : undefined,
+      );
       const resolved = await resolveFirstAvailableModel(candidates);
       const { delegatedThinking } = resolveDelegatedThinking(
         directTier,
@@ -421,50 +470,37 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       }
     };
 
-    if (imageAttached) {
-      const tierModels = [
-        decision.targetLabel,
-        ...(profile[decision.tier]?.fallbacks ?? []),
-      ];
-      if (!tierModels.some(checkModelSupportsImage)) {
-        const tiersToTry: RouterTier[] =
-          decision.tier === 'low'
-            ? ['medium', 'high']
-            : decision.tier === 'medium'
-              ? ['high']
-              : [];
-
-        let foundTier: RouterTier | undefined;
-        for (const t of tiersToTry) {
-          const tierConfig = profile[t];
-          if (!tierConfig) continue;
-          const tModels = [tierConfig.model, ...(tierConfig.fallbacks ?? [])];
-          if (tModels.some(checkModelSupportsImage)) {
-            foundTier = t;
-            break;
-          }
-        }
-
-        if (foundTier) {
-          decision = buildRoutingDecision(
-            profileName,
-            profile,
-            foundTier,
-            phaseForTier(foundTier),
-            `Forced ${foundTier} tier because the originally routed ${decision.tier} tier does not support image attachments.`,
-            state.thinkingByProfile[profileName],
-            false,
-          );
-        }
+    if (
+      imageAttached &&
+      !getTierModels(profile, decision.tier, decision.targetLabel).some(
+        checkModelSupportsImage,
+      )
+    ) {
+      const higherTiers = ROUTER_TIERS.slice(
+        0,
+        ROUTER_TIERS.indexOf(decision.tier),
+      ).reverse() as RouterTier[];
+      const foundTier = higherTiers.find((t) =>
+        getTierModels(profile, t).some(checkModelSupportsImage),
+      );
+      if (foundTier) {
+        decision = buildRoutingDecision(
+          profileName,
+          profile,
+          foundTier,
+          phaseForTier(foundTier),
+          `Forced ${foundTier} tier because the originally routed ${decision.tier} tier does not support image attachments.`,
+          state.thinkingByProfile[profileName],
+          false,
+        );
       }
     }
 
-    let modelsToTry = [
-      ...new Set([
-        decision.targetLabel,
-        ...(profile[decision.tier]?.fallbacks ?? []),
-      ]),
-    ];
+    let modelsToTry = getTierModels(
+      profile,
+      decision.tier,
+      decision.targetLabel,
+    );
     if (imageAttached) {
       modelsToTry = modelsToTry.filter(checkModelSupportsImage);
       if (modelsToTry.length === 0) {

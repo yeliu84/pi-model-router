@@ -90,6 +90,19 @@ describe('routing.ts', () => {
       expect(result).toContain('some thought');
       expect(result).toContain('write_file {"path":"file.txt"}');
     });
+
+    it('should ignore redacted thinking blocks', () => {
+      const parts: Message['content'] = [
+        { type: 'text' as const, text: 'visible answer' },
+        {
+          type: 'thinking' as const,
+          thinking: '[Reasoning redacted]',
+          redacted: true,
+        },
+      ];
+      const result = extractTextFromContent(parts);
+      expect(result).toBe('visible answer');
+    });
   });
 
   describe('extractMessageText', () => {

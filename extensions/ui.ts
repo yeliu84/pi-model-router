@@ -1,8 +1,10 @@
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
   RoutingDecision,
   RouterConfig,
   RouterPinByProfile,
   RouterThinkingByProfile,
+  RouterTier,
   RouterUIContext,
 } from './types';
 
@@ -50,6 +52,14 @@ export const formatThinkingSummary = (
 export const formatModelRef = (ref: string | undefined): string => {
   return ref ?? 'none';
 };
+
+export const formatUnsupportedThinkingWarning = (
+  scope: RouterTier | 'all',
+  level: ThinkingLevel,
+  unsupported: string[],
+): string =>
+  `Router thinking (${scope}) set to ${level}. ` +
+  `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${level}'.`;
 
 export const updateStatus = (
   ctx: RouterUIContext,

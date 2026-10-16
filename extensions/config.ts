@@ -46,6 +46,15 @@ export const isThinkingLevel = (value: unknown): value is ThinkingLevel =>
 export const isRouterTier = (value: unknown): value is RouterTier =>
   value === 'high' || value === 'medium' || value === 'low';
 
+const parsePositiveNumber = (value: unknown): number | undefined =>
+  typeof value === 'number' && value > 0 ? value : undefined;
+
+const parseThinkingLevels = (value: unknown): ThinkingLevel[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const filtered = value.filter(isThinkingLevel);
+  return filtered.length > 0 ? filtered : undefined;
+};
+
 export const parseConfigFile = (path: string): ParsedConfigFile => {
   if (!existsSync(path)) {
     return { config: {}, warnings: [] };
@@ -181,20 +190,14 @@ export const normalizeModelsMap = (
       continue;
     }
 
-    const contextWindow =
-      typeof entry.contextWindow === 'number' && entry.contextWindow > 0
-        ? entry.contextWindow
-        : undefined;
+    const contextWindow = parsePositiveNumber(entry.contextWindow);
     if (entry.contextWindow !== undefined && !contextWindow) {
       warnings.push(
         `Model definition "${alias}" has invalid contextWindow. Ignored.`,
       );
     }
 
-    const maxTokens =
-      typeof entry.maxTokens === 'number' && entry.maxTokens > 0
-        ? entry.maxTokens
-        : undefined;
+    const maxTokens = parsePositiveNumber(entry.maxTokens);
     if (entry.maxTokens !== undefined && !maxTokens) {
       warnings.push(
         `Model definition "${alias}" has invalid maxTokens. Ignored.`,
@@ -204,13 +207,7 @@ export const normalizeModelsMap = (
     const reasoning =
       typeof entry.reasoning === 'boolean' ? entry.reasoning : undefined;
 
-    let thinkingLevels: ThinkingLevel[] | undefined;
-    if (Array.isArray(entry.thinkingLevels)) {
-      thinkingLevels = entry.thinkingLevels.filter((l): l is ThinkingLevel =>
-        isThinkingLevel(l),
-      );
-      if (thinkingLevels.length === 0) thinkingLevels = undefined;
-    }
+    const thinkingLevels = parseThinkingLevels(entry.thinkingLevels);
 
     result[alias] = {
       model,
@@ -286,20 +283,14 @@ export const normalizeTierConfig = (
   }
 
   // Resolve contextWindow: tier config > alias > hardcoded default
-  const tierContextWindow =
-    typeof value.contextWindow === 'number' && value.contextWindow > 0
-      ? value.contextWindow
-      : undefined;
+  const tierContextWindow = parsePositiveNumber(value.contextWindow);
   const resolvedContextWindow =
     tierContextWindow ??
     aliasDefinition?.contextWindow ??
     DEFAULT_CONTEXT_WINDOW;
 
   // Resolve maxTokens: tier config > alias > hardcoded default
-  const tierMaxTokens =
-    typeof value.maxTokens === 'number' && value.maxTokens > 0
-      ? value.maxTokens
-      : undefined;
+  const tierMaxTokens = parsePositiveNumber(value.maxTokens);
   const resolvedMaxTokens =
     tierMaxTokens ?? aliasDefinition?.maxTokens ?? DEFAULT_MAX_TOKENS;
 
@@ -309,14 +300,7 @@ export const normalizeTierConfig = (
   const effectiveReasoning = tierReasoning ?? aliasDefinition?.reasoning;
 
   // Resolve thinkingLevels: tier config > alias > default
-  // Validate tier-level thinkingLevels array
-  let tierThinkingLevels: ThinkingLevel[] | undefined;
-  if (Array.isArray(value.thinkingLevels)) {
-    tierThinkingLevels = value.thinkingLevels.filter((l): l is ThinkingLevel =>
-      isThinkingLevel(l),
-    );
-    if (tierThinkingLevels.length === 0) tierThinkingLevels = undefined;
-  }
+  const tierThinkingLevels = parseThinkingLevels(value.thinkingLevels);
 
   const explicitThinkingLevels =
     tierThinkingLevels ?? aliasDefinition?.thinkingLevels;
@@ -399,10 +383,7 @@ export const normalizeConfig = (
       ? Math.max(0, Math.min(1, raw.phaseBias))
       : 0.5;
 
-  const maxSessionBudget =
-    typeof raw.maxSessionBudget === 'number' && raw.maxSessionBudget > 0
-      ? raw.maxSessionBudget
-      : undefined;
+  const maxSessionBudget = parsePositiveNumber(raw.maxSessionBudget);
 
   const rules: RoutingRule[] = [];
   if (Array.isArray(raw.rules)) {
@@ -588,9 +569,16 @@ export const resolveThinkingLevels = (
   tier: RouterTier,
   profile: RouterProfile,
   modelRegistry?: RouterModelCapabilityLookup,
+  targetModel?: {
+    reasoning?: boolean;
+    thinkingLevelMap?: Partial<Record<ThinkingLevel, string | null>>;
+  },
 ): ThinkingLevel[] | undefined => {
   const tierConfig = profile[tier];
-  const registryModel = findTierModel(tierConfig, modelRegistry);
+  const registryModel =
+    (targetModel?.thinkingLevelMap || targetModel?.reasoning === false
+      ? targetModel
+      : undefined) ?? findTierModel(tierConfig, modelRegistry);
   if (registryModel?.reasoning === false) return [];
   const map = registryModel?.thinkingLevelMap;
   if (map) {
@@ -619,34 +607,53 @@ export const collectProfileThinkingLevels = (
 
 /**
  * Returns tier names whose models don't include the given thinking level
- * in their resolved thinking levels.
+ * in their resolved thinking levels (or explicitly disallow 'off' via thinkingLevelMap).
  */
 export const getUnsupportedTiers = (
   profile: RouterProfile,
   level: ThinkingLevel,
   modelRegistry?: RouterModelCapabilityLookup,
 ): string[] =>
-  ROUTER_TIERS.filter(
-    (tier) =>
-      profile[tier] !== undefined &&
-      !resolveThinkingLevels(tier, profile, modelRegistry)?.includes(level),
-  );
+  ROUTER_TIERS.filter((tier) => {
+    const tierConfig = profile[tier];
+    if (!tierConfig) return false;
+    if (level === 'off') {
+      const registryModel = findTierModel(tierConfig, modelRegistry);
+      return (
+        registryModel?.reasoning !== false &&
+        registryModel?.thinkingLevelMap?.off === null
+      );
+    }
+    return !resolveThinkingLevels(tier, profile, modelRegistry)?.includes(
+      level,
+    );
+  });
 
 /**
- * Clamps a requested thinking level to the highest supported level
- * in the provided array of supported levels.
+ * Clamps a requested thinking level to the nearest supported level
+ * in the provided array of supported levels. Searches downwards first,
+ * then upwards if the model only supports higher levels (e.g. Xiaomi MiMo
+ * 'high'-only or Claude 5.5 / GPT-6 without 'minimal' or 'off').
  */
 export const clampThinkingLevel = (
   requested: ThinkingLevel,
   supported: ThinkingLevel[] | undefined,
+  allowOff = true,
 ): ThinkingLevel => {
-  if (requested === 'off' || !supported) return requested;
+  if (!supported) return requested;
+  if (requested === 'off') {
+    return allowOff
+      ? 'off'
+      : (THINKING_LEVELS.find((l) => l !== 'off' && supported.includes(l)) ??
+          'off');
+  }
 
   const reqIdx = THINKING_LEVELS.indexOf(requested);
   for (let i = reqIdx; i >= 0; i--) {
-    if (supported.includes(THINKING_LEVELS[i])) {
-      return THINKING_LEVELS[i];
-    }
+    if (supported.includes(THINKING_LEVELS[i])) return THINKING_LEVELS[i];
+  }
+  for (let i = reqIdx + 1; i < THINKING_LEVELS.length; i++) {
+    if (supported.includes(THINKING_LEVELS[i])) return THINKING_LEVELS[i];
   }
 
   return 'off';

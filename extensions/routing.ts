@@ -41,7 +41,7 @@ export const extractTextFromContent = (
   return content
     .map((part) => {
       if (part.type === 'text') return part.text;
-      if (part.type === 'thinking') return part.thinking;
+      if (part.type === 'thinking') return part.redacted ? '' : part.thinking;
       if (part.type === 'toolCall')
         return `${part.name} ${JSON.stringify(part.arguments)}`;
       return '';
@@ -64,13 +64,8 @@ export const extractMessageText = (message: Message): string => {
 };
 
 export const getLastUserText = (context: Context): string => {
-  for (let i = context.messages.length - 1; i >= 0; i--) {
-    const message = context.messages[i];
-    if (message.role === 'user') {
-      return extractTextFromContent(message.content).trim();
-    }
-  }
-  return '';
+  const lastUser = context.messages.findLast((m) => m.role === 'user');
+  return lastUser ? extractTextFromContent(lastUser.content).trim() : '';
 };
 
 export const getRecentConversationText = (
@@ -104,16 +99,12 @@ export const hasImageAttachment = (context: Context): boolean => {
 };
 
 export const extractLastUserImages = (context: Context): ImageContent[] => {
-  for (let i = context.messages.length - 1; i >= 0; i--) {
-    const message = context.messages[i];
-    if (message.role === 'user') {
-      if (!Array.isArray(message.content)) return [];
-      return message.content.filter(
+  const lastUser = context.messages.findLast((m) => m.role === 'user');
+  return Array.isArray(lastUser?.content)
+    ? lastUser.content.filter(
         (part): part is ImageContent => part.type === 'image',
-      );
-    }
-  }
-  return [];
+      )
+    : [];
 };
 
 export const containsAny = (text: string, keywords: string[]): boolean => {

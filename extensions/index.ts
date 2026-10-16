@@ -20,7 +20,11 @@ import {
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import { isRouterPersistedState, buildPersistedState } from './state';
-import { updateStatus, formatDecision } from './ui';
+import {
+  updateStatus,
+  formatDecision,
+  formatUnsupportedThinkingWarning,
+} from './ui';
 import { registerCommands } from './commands';
 import {
   registerRouterProvider,
@@ -450,6 +454,10 @@ const routerExtension = <
     }
   });
 
+  pi.on('session_tree', async (_event, ctx) => {
+    await restoreStateFromSession(ctx);
+  });
+
   // Eagerly initialize the model registry from any event that provides
   // ExtensionContext. In subagent contexts (e.g. pi-dynamic-workflows),
   // session_start may never fire, but turn_start/model_select fire before every LLM
@@ -538,19 +546,16 @@ const routerExtension = <
     }
     persistState();
     actions.updateStatus(ctx);
-    if (event.level !== 'off') {
-      const unsupported = getUnsupportedTiers(
-        currentConfig.profiles[selectedProfile],
-        event.level,
-        ctx.modelRegistry,
+    const unsupported = getUnsupportedTiers(
+      currentConfig.profiles[selectedProfile],
+      event.level,
+      ctx.modelRegistry,
+    );
+    if (unsupported.length > 0) {
+      ctx.ui.notify(
+        formatUnsupportedThinkingWarning('all', event.level, unsupported),
+        'warning',
       );
-      if (unsupported.length > 0) {
-        ctx.ui.notify(
-          `Router thinking (all) set to ${event.level}. ` +
-            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${event.level}'.`,
-          'warning',
-        );
-      }
     }
   });
 };

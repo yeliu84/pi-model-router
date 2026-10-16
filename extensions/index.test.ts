@@ -49,6 +49,9 @@ vi.mock('./config', () => ({
     'max',
   ] as const,
   isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
+  isThinkingLevel: (v: unknown) =>
+    typeof v === 'string' &&
+    ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(v),
   isObjectRecord: (v: unknown): v is Record<string, unknown> =>
     typeof v === 'object' && v !== null && !Array.isArray(v),
 }));
@@ -166,6 +169,10 @@ describe('index.ts (orchestrator)', () => {
     );
     expect(mockPi.on).toHaveBeenCalledWith(
       'session_start',
+      expect.any(Function),
+    );
+    expect(mockPi.on).toHaveBeenCalledWith(
+      'session_tree',
       expect.any(Function),
     );
     expect(mockPi.on).toHaveBeenCalledWith(

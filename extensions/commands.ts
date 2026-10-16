@@ -17,6 +17,8 @@ import {
   THINKING_LEVELS,
   ROUTER_PIN_VALUES,
   ROUTER_TIERS,
+  isRouterTier,
+  isThinkingLevel,
   parseCanonicalModelRef,
   getUnsupportedTiers,
 } from './config';
@@ -25,6 +27,7 @@ import {
   formatThinkingSummary,
   formatModelRef,
   formatDecision,
+  formatUnsupportedThinkingWarning,
 } from './ui';
 
 export const registerCommands = <
@@ -320,36 +323,17 @@ export const registerCommands = <
       return;
     }
 
-    let tier: RouterTier | 'all' | undefined = undefined;
-    let levelValue = '';
-
-    const tierValues = ['high', 'medium', 'low'];
-    const levelValues = ['auto', ...THINKING_LEVELS];
-
-    if (args.length === 1) {
-      levelValue = args[0];
-      tier = 'all';
-    } else if (args.length === 2) {
-      if (tierValues.includes(args[0]) || args[0] === 'all') {
-        tier = args[0] as RouterTier | 'all';
-        levelValue = args[1];
-      } else {
-        ctx.ui.notify(
-          `Invalid tier: ${args[0]}. Use high, medium, or low.`,
-          'error',
-        );
-        return;
-      }
-    }
-
-    if (tier !== 'all' && !tierValues.includes(tier as string)) {
+    const tierArg = args.length === 1 ? 'all' : args[0];
+    if (tierArg !== 'all' && !isRouterTier(tierArg)) {
       ctx.ui.notify(
-        `Invalid tier: ${tier}. Use high, medium, or low.`,
+        `Invalid tier: ${tierArg}. Use high, medium, or low.`,
         'error',
       );
       return;
     }
-    if (!levelValues.includes(levelValue)) {
+    const tier: RouterTier | 'all' = tierArg;
+    const levelValue = args.length === 1 ? args[0] : args[1];
+    if (levelValue !== 'auto' && !isThinkingLevel(levelValue)) {
       ctx.ui.notify(
         `Invalid thinking level: ${levelValue}. Use auto or: ${THINKING_LEVELS.join(', ')}`,
         'error',
@@ -357,27 +341,14 @@ export const registerCommands = <
       return;
     }
 
-    const nextLevel =
-      levelValue === 'auto' ? undefined : (levelValue as ThinkingLevel);
-    if (tier === 'all') {
-      for (const t of ROUTER_TIERS) {
-        if (!state.thinkingByProfile[currentProfile])
-          state.thinkingByProfile[currentProfile] = {};
-        if (nextLevel) state.thinkingByProfile[currentProfile]![t] = nextLevel;
-        else delete state.thinkingByProfile[currentProfile]![t];
-      }
-    } else {
-      if (!state.thinkingByProfile[currentProfile])
-        state.thinkingByProfile[currentProfile] = {};
-      if (nextLevel)
-        state.thinkingByProfile[currentProfile]![tier as RouterTier] =
-          nextLevel;
-      else delete state.thinkingByProfile[currentProfile]![tier as RouterTier];
+    const nextLevel = levelValue === 'auto' ? undefined : levelValue;
+    const targetTiers = tier === 'all' ? ROUTER_TIERS : [tier];
+    const profileThinking = (state.thinkingByProfile[currentProfile] ??= {});
+    for (const t of targetTiers) {
+      if (nextLevel) profileThinking[t] = nextLevel;
+      else delete profileThinking[t];
     }
-    if (
-      state.thinkingByProfile[currentProfile] &&
-      Object.keys(state.thinkingByProfile[currentProfile]!).length === 0
-    ) {
+    if (Object.keys(profileThinking).length === 0) {
       delete state.thinkingByProfile[currentProfile];
     }
 
@@ -388,8 +359,7 @@ export const registerCommands = <
     } else if (state.lastDecision) {
       actions.syncPiThinkingLevel(state.lastDecision.thinking);
     }
-    // Only warn when the level isn't supported by some tiers; skip for 'off' and 'auto'
-    if (nextLevel && nextLevel !== 'off') {
+    if (nextLevel) {
       const unsupported = getUnsupportedTiers(
         state.currentConfig.profiles[currentProfile],
         nextLevel,
@@ -397,8 +367,7 @@ export const registerCommands = <
       );
       if (unsupported.length > 0) {
         ctx.ui.notify(
-          `Router thinking (${tier}) set to ${nextLevel}. ` +
-            `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${nextLevel}'.`,
+          formatUnsupportedThinkingWarning(tier, nextLevel, unsupported),
           'warning',
         );
       }

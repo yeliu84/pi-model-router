@@ -16,8 +16,8 @@ import {
   decideRouting,
   runClassifier,
   runNativeClassifier,
+  selectClassifierImages,
 } from './routing';
-import { streamSimple } from '@earendil-works/pi-ai/compat';
 import {
   createAssistantMessageEventStream,
   type AssistantMessageEventStream,
@@ -27,15 +27,12 @@ import {
   type ClassifierModel,
   type ClassifierResult,
   type Context,
+  type ImageContent,
   type Message,
   type Model,
   type ToolResultMessage,
 } from '@earendil-works/pi-ai';
 import type { RouterModelRegistry, RouterProfile, RoutingRule } from './types';
-
-vi.mock('@earendil-works/pi-ai/compat', () => ({
-  streamSimple: vi.fn(),
-}));
 
 const createAssistantMsg = (text: string): AssistantMessage => ({
   role: 'assistant',
@@ -610,11 +607,7 @@ describe('routing.ts', () => {
         }
         return undefined;
       },
-      getApiKeyAndHeaders: async () => ({
-        ok: true,
-        apiKey: 'test-key',
-        headers: {},
-      }),
+      streamSimple: vi.fn(),
     };
 
     const context: Context = {
@@ -626,11 +619,11 @@ describe('routing.ts', () => {
         'Tier: high\n',
         'Reasoning: Needs deep reasoner.',
       );
-      vi.mocked(streamSimple).mockReturnValue(mockStream);
+      const registryStreamSimple = vi.fn().mockReturnValue(mockStream);
 
       const result = await runClassifier(
         'openai/gpt-4o',
-        mockRegistry,
+        { ...mockRegistry, streamSimple: registryStreamSimple },
         context,
         'planning',
         'high',
@@ -639,195 +632,23 @@ describe('routing.ts', () => {
         tier: 'high',
         reasoning: 'Needs deep reasoner.',
       });
-    });
-
-    it('should return undefined if stream fails or format is invalid', async () => {
-      const mockStream = createTextDeltaStream('Invalid response format');
-      vi.mocked(streamSimple).mockReturnValue(mockStream);
-
-      const result = await runClassifier(
-        'openai/gpt-4o',
-        mockRegistry,
-        context,
-      );
-      expect(result).toBeUndefined();
-    });
-
-    it('should accept headers-only authentication in runClassifier', async () => {
-      const headersOnlyRegistry: RouterModelRegistry = {
-        find: (provider: string, modelId: string) =>
-          createClassifierModel(provider, modelId),
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          apiKey: undefined,
-          headers: { Authorization: 'Bearer kimi-oauth-token' },
-        }),
-      };
-
-      const mockStream = createTextDeltaStream(
-        'Tier: low\n',
-        'Reasoning: Short lookup.',
-      );
-      vi.mocked(streamSimple).mockReturnValue(mockStream);
-
-      const result = await runClassifier(
-        'kimi-coding/k3',
-        headersOnlyRegistry,
-        context,
-      );
-      expect(result).toEqual({
-        tier: 'low',
-        reasoning: 'Short lookup.',
-      });
-    });
-
-    it('should merge model.headers with auth.headers and run classifier without apiKey', async () => {
-      const mockStream = createTextDeltaStream(
-        'Tier: low\n',
-        'Reasoning: Simple greeting.',
-      );
-      vi.mocked(streamSimple).mockReturnValue(mockStream);
-
-      const customHeadersRegistry: RouterModelRegistry = {
-        find: (provider: string, modelId: string) => {
-          if (provider === 'openai' && modelId === 'gpt-4o') {
-            return {
-              ...createClassifierModel(provider, modelId),
-              headers: {
-                'cf-aig-authorization': 'Bearer cf-token',
-                'x-custom': 'from-model',
-              },
-            };
-          }
-          return undefined;
-        },
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          apiKey: undefined,
-          headers: {
-            'x-custom': 'from-auth',
-          },
-        }),
-      };
-
-      const result = await runClassifier(
-        'openai/gpt-4o',
-        customHeadersRegistry,
-        context,
-      );
-      expect(result).toEqual({
-        tier: 'low',
-        reasoning: 'Simple greeting.',
-      });
-      expect(streamSimple).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'gpt-4o' }),
-        expect.anything(),
-        expect.objectContaining({
-          apiKey: undefined,
-          headers: {
-            'cf-aig-authorization': 'Bearer cf-token',
-            'x-custom': 'from-auth',
-          },
-        }),
-      );
-    });
-
-    it('should override model.baseUrl with auth.baseUrl when running classifier (e.g. GitHub Copilot proxy-ep)', async () => {
-      const mockStream = createTextDeltaStream(
-        'Tier: low\n',
-        'Reasoning: Copilot classifier.',
-      );
-      vi.mocked(streamSimple).mockReturnValue(mockStream);
-
-      const copilotRegistry: RouterModelRegistry = {
-        ...mockRegistry,
-        getApiKeyAndHeaders: async () => ({
-          ok: true,
-          apiKey: 'copilot-oauth-token',
-          headers: {},
-          baseUrl: 'https://api.enterprise.githubcopilot.com',
-        }),
-      };
-
-      const result = await runClassifier(
-        'openai/gpt-4o',
-        copilotRegistry,
-        context,
-      );
-      expect(result).toEqual({
-        tier: 'low',
-        reasoning: 'Copilot classifier.',
-      });
-      expect(streamSimple).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'gpt-4o',
-          baseUrl: 'https://api.enterprise.githubcopilot.com',
-        }),
-        expect.anything(),
-        expect.objectContaining({
-          apiKey: 'copilot-oauth-token',
-        }),
-      );
-    });
-
-    it('should use custom registered provider streamSimple when available', async () => {
-      vi.mocked(streamSimple).mockClear();
-      const customStreamFn = vi
-        .fn()
-        .mockReturnValue(
-          createTextDeltaStream(
-            'Tier: medium\n',
-            'Reasoning: Custom provider classifier.',
-          ),
-        );
-      const customProviderRegistry: RouterModelRegistry = {
-        ...mockRegistry,
-        getRegisteredProviderConfig: vi.fn().mockReturnValue({
-          api: 'openai-completions',
-          streamSimple: customStreamFn,
-        }),
-      };
-
-      const result = await runClassifier(
-        'openai/gpt-4o',
-        customProviderRegistry,
-        context,
-      );
-      expect(result).toEqual({
-        tier: 'medium',
-        reasoning: 'Custom provider classifier.',
-      });
-      expect(customStreamFn).toHaveBeenCalled();
-      expect(streamSimple).not.toHaveBeenCalled();
-    });
-
-    it('should use modelRegistry.streamSimple directly when available for chat LLM classifier', async () => {
-      const registryStreamSimple = vi
-        .fn()
-        .mockReturnValue(
-          createTextDeltaStream('Tier: high\n', 'Reasoning: Registry stream.'),
-        );
-      const registryWithStreamSimple: RouterModelRegistry = {
-        ...mockRegistry,
-        streamSimple: registryStreamSimple,
-      };
-
-      const result = await runClassifier(
-        'openai/gpt-4o',
-        registryWithStreamSimple,
-        context,
-        'planning',
-        'high',
-      );
-      expect(result).toEqual({
-        tier: 'high',
-        reasoning: 'Registry stream.',
-      });
       expect(registryStreamSimple).toHaveBeenCalledWith(
         expect.objectContaining({ provider: 'openai', id: 'gpt-4o' }),
         expect.anything(),
         expect.objectContaining({ reasoning: 'high' }),
       );
+    });
+
+    it('should return undefined if stream fails or format is invalid', async () => {
+      const mockStream = createTextDeltaStream('Invalid response format');
+      const registryStreamSimple = vi.fn().mockReturnValue(mockStream);
+
+      const result = await runClassifier(
+        'openai/gpt-4o',
+        { ...mockRegistry, streamSimple: registryStreamSimple },
+        context,
+      );
+      expect(result).toBeUndefined();
     });
 
     it('should classify using Pi native classifier model via findOfType and classify()', async () => {
@@ -1006,6 +827,111 @@ describe('routing.ts', () => {
         reasoning:
           'typesafe/jev-latest selected high (p=44%, conf=19%) [phase-biased from medium].',
       });
+    });
+
+    it('should filter unsupported image MIME types, cap at 4 images, and retry text-only if image classification fails', async () => {
+      const jevClassifier: ClassifierModel<'typesafe-system-one'> = {
+        type: 'classifier',
+        id: 'jev-latest',
+        name: 'Jev Latest',
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        baseUrl: 'https://api.typesafe.ai',
+        input: ['text', 'image'],
+        contextWindow: 32000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const clefClassifier: ClassifierModel<'cloudflare-workers-ai-system-one'> =
+        {
+          type: 'classifier',
+          id: '@cf/cloudflare/clef-omni',
+          name: 'Clef Omni',
+          api: 'cloudflare-workers-ai-system-one',
+          provider: 'cloudflare-workers-ai',
+          baseUrl: 'https://api.cloudflare.com/client/v4/accounts/acc/ai',
+          input: ['text', 'image'],
+          contextWindow: 65536,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: { imageInput: 'images' },
+        };
+
+      const sampleImages: ImageContent[] = [
+        { type: 'image', data: '1', mimeType: 'image/png' },
+        { type: 'image', data: '2', mimeType: 'image/webp' },
+        { type: 'image', data: '3', mimeType: 'image/gif' },
+        { type: 'image', data: '4', mimeType: 'image/jpeg' },
+        { type: 'image', data: '5', mimeType: 'image/png' },
+        { type: 'image', data: '6', mimeType: 'image/jpeg' },
+      ];
+
+      // Jev (assets format) only accepts PNG and JPEG
+      expect(
+        selectClassifierImages(jevClassifier, sampleImages).map(
+          (i) => i.mimeType,
+        ),
+      ).toEqual(['image/png', 'image/jpeg', 'image/png', 'image/jpeg']);
+
+      // Clef (images format) accepts PNG, JPEG, WebP up to 4 images
+      expect(
+        selectClassifierImages(clefClassifier, sampleImages).map((i) => i.data),
+      ).toEqual(['1', '2', '4', '5']);
+
+      // When classify() fails with stopReason='error' on images, retry text-only
+      const classifyFn = vi
+        .fn()
+        .mockResolvedValueOnce({
+          api: 'typesafe-system-one',
+          provider: 'typesafe',
+          model: 'jev-latest',
+          stopReason: 'error',
+          errorMessage: 'Experimental image input failed',
+          timestamp: Date.now(),
+          answers: {},
+        } satisfies ClassifierResult)
+        .mockResolvedValueOnce({
+          api: 'typesafe-system-one',
+          provider: 'typesafe',
+          model: 'jev-latest',
+          stopReason: 'stop',
+          timestamp: Date.now(),
+          answers: {
+            tier: {
+              type: 'choice',
+              choice: 'medium',
+              probabilities: { high: 0.1, medium: 0.8, low: 0.1 },
+              confidence: 0.75,
+            },
+          },
+        } satisfies ClassifierResult);
+
+      const imageCtx: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Implement the button layout' },
+              { type: 'image', data: 'pngdata', mimeType: 'image/png' },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      };
+
+      const result = await runNativeClassifier(
+        'typesafe/jev-latest',
+        {
+          ...mockRegistry,
+          findOfType: vi.fn().mockReturnValue(jevClassifier),
+          classify: classifyFn,
+        },
+        imageCtx,
+      );
+
+      expect(classifyFn).toHaveBeenCalledTimes(2);
+      expect(classifyFn.mock.calls[0][1]).toHaveProperty('images');
+      expect(classifyFn.mock.calls[1][1]).not.toHaveProperty('images');
+      expect(result?.tier).toBe('medium');
     });
 
     it('should extractLastUserImages and tierForPhase accurately', () => {

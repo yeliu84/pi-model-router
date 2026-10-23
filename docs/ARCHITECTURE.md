@@ -31,7 +31,7 @@ For every request sent to a `router/*` virtual model, `route(request, ctx)` insp
   1. **Budget Check**: If `maxSessionBudget` is configured and session spend exceeds it, downgrades `high` tier requests to `medium`.
   2. **Manual Pin**: Uses the tier pinned via `/router pin` or `/router fix`.
   3. **Custom Rules**: Matches keyword-based rules defined in config against the user prompt.
-  4. **Classifier (Optional)**: When `classifierModel` is configured, prefers Pi's native classifier models (`ctx.modelRegistry.classify()` with `"auto"`, TypeSafe Jev, Cloudflare Clef, OpenAI GPT-6 Luna, or `llama.cpp` classifiers) and falls back to chat LLM classification (`ctx.modelRegistry.streamSimple()`).
+  4. **Classifier (Optional)**: When `classifierModel` is configured, prefers Pi's native classifier models (`ctx.modelRegistry.classify()` with `"auto"`, TypeSafe Jev, Cloudflare Clef / Clef Omni, OpenAI GPT-6 Luna, or `llama.cpp` classifiers — with image filtering and text-only fallback) and falls back to chat LLM classification (`ctx.modelRegistry.streamSimple()`).
   5. **Heuristics (Fallback)**: Uses fast local heuristics (keyword/length/tool-use analysis) if the classifier is off or fails.
   6. **Biased Stickiness**: The `phaseBias` setting modulates heuristic thresholds and low-confidence classifier probabilities to keep the router in a consistent phase.
 

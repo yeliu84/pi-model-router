@@ -128,7 +128,6 @@ describe('commands.ts', () => {
     reloadConfig: vi.fn(),
     ensureValidActiveRouterProfile: vi.fn(),
     switchToRouterProfile: vi.fn().mockResolvedValue(true),
-    syncPiThinkingLevel: vi.fn(),
   });
 
   describe('Registration & Subcommand Completion', () => {
@@ -667,33 +666,6 @@ describe('commands.ts', () => {
       // The profile entry should be cleaned up since it's empty
       expect(state.thinkingByProfile.balanced).toBeUndefined();
       expect(actions.persistState).toHaveBeenCalled();
-    });
-
-    it('should sync pi thinking level when setting a level', async () => {
-      const pi = buildMockPi();
-      const state = buildDefaultState();
-      const actions = buildMockActions();
-      const ctx = buildMockCtx();
-
-      registerCommands(pi, state, actions);
-      const cmd = pi.getRegisteredCommand();
-
-      await cmd.handler('thinking high', ctx);
-      expect(actions.syncPiThinkingLevel).toHaveBeenCalledWith('high');
-    });
-
-    it('should restore last decision thinking when setting auto', async () => {
-      const pi = buildMockPi();
-      const state = buildDefaultState();
-      const actions = buildMockActions();
-      const ctx = buildMockCtx();
-
-      registerCommands(pi, state, actions);
-      const cmd = pi.getRegisteredCommand();
-
-      await cmd.handler('thinking auto', ctx);
-      // lastDecision.thinking is 'medium'
-      expect(actions.syncPiThinkingLevel).toHaveBeenCalledWith('medium');
     });
 
     it('should warn about unsupported tiers', async () => {

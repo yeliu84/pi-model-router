@@ -6,7 +6,6 @@ import type {
   ClassifierModel,
   ClassifierResult,
   Model,
-  SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type {
   ExtensionAPI,
@@ -53,12 +52,11 @@ export type RouterModelLookup = Pick<ExtensionContext['modelRegistry'], 'find'>;
 
 export type RouterModelRegistry = Pick<
   ExtensionContext['modelRegistry'],
-  'find' | 'getApiKeyAndHeaders'
+  'find'
 > &
   Partial<
     Pick<
       ExtensionContext['modelRegistry'],
-      | 'getRegisteredProviderConfig'
       | 'hasConfiguredAuth'
       | 'findOfType'
       | 'getAvailableOfType'
@@ -72,17 +70,6 @@ export interface ClassifierDecisionResult {
   reasoning: string;
   cost?: number;
 }
-
-export type ResolvedModelRequest =
-  | {
-      ok: true;
-      model: Model<Api>;
-      streamOptions: Pick<SimpleStreamOptions, 'apiKey' | 'headers' | 'env'>;
-    }
-  | {
-      ok: false;
-      error: string;
-    };
 
 export interface RouterUIContext {
   ui: {
@@ -118,10 +105,7 @@ export interface RouterExtensionContext extends RouterUIContext {
   sessionManager: {
     getBranch: () => readonly CustomSessionEntry[];
   };
-  ui: RouterUIContext['ui'] &
-    RouterCommandContext['ui'] & {
-      setHiddenThinkingLabel?: (label?: string) => void;
-    };
+  ui: RouterUIContext['ui'] & RouterCommandContext['ui'];
 }
 
 export interface RouterModelSelectEvent {
@@ -177,7 +161,6 @@ export interface RouterExtensionAPI<
     },
   ) => void;
   setModel: ExtensionAPI['setModel'];
-  setThinkingLevel: ExtensionAPI['setThinkingLevel'];
   appendEntry: ExtensionAPI['appendEntry'];
   on(
     event: 'session_start' | 'session_tree' | 'turn_start' | 'turn_end',

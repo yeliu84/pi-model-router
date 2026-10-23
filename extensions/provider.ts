@@ -34,13 +34,8 @@ import {
   decideRouting,
   runClassifier,
   hasImageAttachment,
-  resolveModelRequestAuth,
 } from './routing';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
-
-const REGISTRY_WAIT_TIMEOUT_MS = 5000;
-const REGISTRY_WAIT_INITIAL_DELAY_MS = 50;
-const REGISTRY_WAIT_MAX_DELAY_MS = 500;
 
 const countedMessages = new WeakSet<object>();
 
@@ -50,17 +45,10 @@ export const markMessageCostCounted = (message: unknown): void => {
   }
 };
 
-export const extractUncountedMessageCost = (input: unknown): number => {
-  if (!isObjectRecord(input)) return 0;
-  const message =
-    input.role === 'assistant'
-      ? input
-      : isObjectRecord(input.message)
-        ? input.message
-        : undefined;
+const extractSingleMessageCost = (message: unknown): number => {
   if (
-    !message ||
-    message.role !== 'assistant' ||
+    !isObjectRecord(message) ||
+    (message.role !== 'assistant' && message.role !== 'toolResult') ||
     countedMessages.has(message)
   ) {
     return 0;
@@ -73,26 +61,18 @@ export const extractUncountedMessageCost = (input: unknown): number => {
   return typeof total === 'number' && total > 0 ? total : 0;
 };
 
-/**
- * Wait for the model registry to become available with exponential backoff.
- * Fallback for callers that invoke routing before `session_start` without a bound `ctx.modelRegistry`.
- */
-export const waitForRegistry = async <TRegistry = RouterModelRegistry>(
-  state: {
-    readonly currentModelRegistry: TRegistry | undefined;
-  },
-  timeoutMs: number = REGISTRY_WAIT_TIMEOUT_MS,
-): Promise<TRegistry | undefined> => {
-  if (state.currentModelRegistry) return state.currentModelRegistry;
-
-  const start = Date.now();
-  let delay = REGISTRY_WAIT_INITIAL_DELAY_MS;
-  while (Date.now() - start < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    if (state.currentModelRegistry) return state.currentModelRegistry;
-    delay = Math.min(delay * 2, REGISTRY_WAIT_MAX_DELAY_MS);
+export const extractUncountedMessageCost = (input: unknown): number => {
+  if (!isObjectRecord(input)) return 0;
+  if (input.role === 'assistant' || input.role === 'toolResult') {
+    return extractSingleMessageCost(input);
   }
-  return undefined;
+  let cost = extractSingleMessageCost(input.message);
+  if (Array.isArray(input.toolResults)) {
+    for (const toolResult of input.toolResults) {
+      cost += extractSingleMessageCost(toolResult);
+    }
+  }
+  return cost;
 };
 
 const supportsReasoning = (
@@ -175,8 +155,6 @@ export interface RouterProviderState<TContext = ExtensionContext> {
   readonly thinkingByProfile: RouterThinkingByProfile;
   readonly pinnedTierByProfile: RouterPinByProfile;
   accumulatedCost: number;
-  /** Override for the registry wait timeout (for testing). */
-  readonly registryTimeoutMs?: number;
 }
 
 export interface RouterProviderActions<TContext = ExtensionContext> {
@@ -187,7 +165,6 @@ export interface RouterProviderActions<TContext = ExtensionContext> {
     tier: RouterTier,
   ) => ThinkingLevel | undefined;
   updateStatus: (ctx: TContext) => void;
-  syncPiThinkingLevel: (level: ThinkingLevel) => void;
 }
 
 export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
@@ -204,12 +181,9 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       ctx.modelRegistry
         ? (ctx.modelRegistry as RouterModelRegistry)
         : undefined;
-    const registry =
-      ctxRegistry ?? (await waitForRegistry(state, state.registryTimeoutMs));
+    const registry = ctxRegistry ?? state.currentModelRegistry;
     if (!registry) {
-      throw new Error(
-        'Router provider initialization timed out. session_start may not have fired.',
-      );
+      throw new Error('Router model registry is unavailable.');
     }
 
     const profileName = request.model.id;
@@ -218,9 +192,9 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       throw new Error(`Unknown router profile: ${profileName}`);
     }
 
-    const resolveCandidate = async (
+    const resolveCandidate = (
       modelRef: string,
-    ): Promise<
+    ):
       | {
           ok: true;
           model: Model<Api>;
@@ -230,8 +204,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       | {
           ok: false;
           error: string;
-        }
-    > => {
+        } => {
       const { provider, modelId } = parseCanonicalModelRef(modelRef);
       if (provider === 'router') {
         return {
@@ -255,23 +228,19 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
           error: `No configured credentials for routed model: ${provider}/${modelId}`,
         };
       }
-      const resolvedAuth = await resolveModelRequestAuth(targetModel, registry);
-      if (!resolvedAuth.ok) {
-        return { ok: false, error: resolvedAuth.error };
-      }
       return {
         ok: true,
-        model: resolvedAuth.model,
+        model: targetModel,
         provider,
         modelId,
       };
     };
 
-    const resolveFirstAvailableModel = async (candidates: string[]) => {
+    const resolveFirstAvailableModel = (candidates: string[]) => {
       let lastError: unknown;
       for (let i = 0; i < candidates.length; i++) {
         const modelRef = candidates[i];
-        const resolved = await resolveCandidate(modelRef);
+        const resolved = resolveCandidate(modelRef);
         if (!resolved.ok) {
           lastError = new Error(resolved.error);
           continue;
@@ -336,7 +305,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
           ? previousDecision.targetLabel
           : undefined,
       );
-      const resolved = await resolveFirstAvailableModel(candidates);
+      const resolved = resolveFirstAvailableModel(candidates);
       const { delegatedThinking } = resolveDelegatedThinking(
         directTier,
         tierConfig.thinking ?? directTier,
@@ -348,11 +317,9 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       };
     }
 
-    // Account for any completed assistant responses not yet recorded.
+    // Account for any completed assistant or toolResult (e.g. codemode) usage not yet recorded.
     for (const msg of request.messages) {
-      if (msg.role === 'assistant') {
-        state.accumulatedCost += extractUncountedMessageCost(msg);
-      }
+      state.accumulatedCost += extractUncountedMessageCost(msg);
     }
     if (request.failed?.message) {
       state.accumulatedCost += extractUncountedMessageCost(
@@ -520,7 +487,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       }
     }
 
-    const resolved = await resolveFirstAvailableModel(modelsToTry);
+    const resolved = resolveFirstAvailableModel(modelsToTry);
     const selectedModel = resolved.model;
     if (resolved.modelRef !== decision.targetLabel || resolved.index > 0) {
       const originalTarget = decision.targetLabel;
@@ -555,7 +522,6 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
 
     const effectiveCtx = ctx ?? state.lastExtensionContext;
     try {
-      actions.syncPiThinkingLevel(effectiveThinking);
       if (effectiveCtx) {
         actions.updateStatus(effectiveCtx);
       }

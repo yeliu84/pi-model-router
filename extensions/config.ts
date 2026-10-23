@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
+import type { Api, Model } from '@earendil-works/pi-ai';
+import { getSupportedThinkingLevels } from '@earendil-works/pi-ai/models';
 import type {
   RouterConfig,
   RouterProfile,
@@ -580,13 +582,11 @@ export const resolveThinkingLevels = (
       ? targetModel
       : undefined) ?? findTierModel(tierConfig, modelRegistry);
   if (registryModel?.reasoning === false) return [];
-  const map = registryModel?.thinkingLevelMap;
-  if (map) {
-    return THINKING_LEVELS.filter(
-      (l) =>
-        l !== 'off' &&
-        (l === 'xhigh' || l === 'max' ? map[l] != null : map[l] !== null),
-    );
+  if (registryModel?.thinkingLevelMap) {
+    return getSupportedThinkingLevels({
+      reasoning: true,
+      ...registryModel,
+    } as Model<Api>).filter((l) => l !== 'off');
   }
   return tierConfig?.resolvedThinkingLevels;
 };
@@ -621,7 +621,11 @@ export const getUnsupportedTiers = (
       const registryModel = findTierModel(tierConfig, modelRegistry);
       return (
         registryModel?.reasoning !== false &&
-        registryModel?.thinkingLevelMap?.off === null
+        registryModel?.thinkingLevelMap !== undefined &&
+        !getSupportedThinkingLevels({
+          reasoning: true,
+          ...registryModel,
+        } as Model<Api>).includes('off')
       );
     }
     return !resolveThinkingLevels(tier, profile, modelRegistry)?.includes(

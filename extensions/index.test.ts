@@ -76,11 +76,6 @@ const buildMockCtx = () => ({
     find: vi
       .fn<(provider: string, modelId: string) => Model<Api> | undefined>()
       .mockReturnValue(createTestModel({ provider: 'router', id: 'balanced' })),
-    getApiKeyAndHeaders: async () => ({
-      ok: true as const,
-      apiKey: 'key',
-      headers: {},
-    }),
   },
   model: {
     provider: 'router',
@@ -92,7 +87,6 @@ const buildMockCtx = () => ({
   ui: {
     setStatus: vi.fn((_key: string, _text: string | undefined) => {}),
     setWidget: vi.fn((_key: string, _content: string[] | undefined) => {}),
-    setHiddenThinkingLabel: vi.fn((_label?: string) => {}),
     theme: { fg: (_c: 'dim', text: string) => text },
     notify: vi.fn(
       (_message: string, _type?: 'info' | 'warning' | 'error') => {},
@@ -126,7 +120,6 @@ const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
   registerProvider: vi.fn(() => {}),
   registerCommand: vi.fn(() => {}),
   setModel: vi.fn(async () => true),
-  setThinkingLevel: vi.fn(() => {}),
   appendEntry: vi.fn(() => {}),
   on: vi.fn((event: string, handler: RegisteredHandler) => {
     if (!eventListeners[event]) {
@@ -234,40 +227,8 @@ describe('index.ts (orchestrator)', () => {
     expect(mockCtx.ui.setStatus).toHaveBeenCalled();
   });
 
-  it('should enforce router model on turn_end hook', async () => {
-    routerExtension(mockPi);
-
-    const mockCtx = buildMockCtx();
-
-    // Trigger session_start to initialize
-    const sessionStartHandlers = eventListeners['session_start'] || [];
-    for (const handler of sessionStartHandlers) {
-      await handler({}, mockCtx);
-    }
-
-    // Now trigger model_select to select a router model
-    const modelSelectHandlers = eventListeners['model_select'] || [];
-    for (const handler of modelSelectHandlers) {
-      await handler({ model: { provider: 'router', id: 'balanced' } }, mockCtx);
-    }
-
-    // Change current model to non-router model
-    mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
-
-    // Trigger turn_end
-    const turnEndHandlers = eventListeners['turn_end'] || [];
-    for (const handler of turnEndHandlers) {
-      await handler({}, mockCtx);
-    }
-
-    // It should have restored model selection to the active router profile model
-    expect(mockPi.setModel).toHaveBeenCalledWith(
-      expect.objectContaining({ provider: 'router', id: 'balanced' }),
-    );
-  });
-
   describe('model_select event', () => {
-    it('should set routerEnabled=false, record lastNonRouterModel, and call setHiddenThinkingLabel for non-router model', async () => {
+    it('should set routerEnabled=false and record lastNonRouterModel for non-router model', async () => {
       routerExtension(mockPi);
 
       const mockCtx = buildMockCtx();
@@ -289,9 +250,6 @@ describe('index.ts (orchestrator)', () => {
           mockCtx,
         );
       }
-
-      // Should have called setHiddenThinkingLabel
-      expect(mockCtx.ui.setHiddenThinkingLabel).toHaveBeenCalled();
 
       // Should have persisted state (routerEnabled=false, lastNonRouterModel set)
       expect(mockPi.appendEntry).toHaveBeenCalledWith(
@@ -323,7 +281,6 @@ describe('index.ts (orchestrator)', () => {
 
       // Should NOT have persisted state or updated status
       expect(mockPi.appendEntry).not.toHaveBeenCalled();
-      expect(mockCtx.ui.setHiddenThinkingLabel).not.toHaveBeenCalled();
     });
   });
 
@@ -428,38 +385,6 @@ describe('index.ts (orchestrator)', () => {
           thinkingByProfile: {},
         }),
       );
-    });
-
-    it('should ignore thinking_level_select emitted during internal model switches (e.g. turn_end)', async () => {
-      const mockCtx = buildMockCtx();
-
-      routerExtension(mockPi);
-
-      const sessionStartHandlers = eventListeners['session_start'] || [];
-      for (const handler of sessionStartHandlers) {
-        await handler({}, mockCtx);
-      }
-
-      mockPi.appendEntry.mockClear();
-
-      // Simulate pi.setModel emitting thinking_level_select during turn_end restoration
-      mockPi.setModel = vi.fn(async () => {
-        mockCtx.model = { provider: 'router', id: 'balanced' };
-        const thinkingHandlers = eventListeners['thinking_level_select'] || [];
-        for (const handler of thinkingHandlers) {
-          await handler({ level: 'medium' }, mockCtx);
-        }
-        return true;
-      });
-
-      mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
-      const turnEndHandlers = eventListeners['turn_end'] || [];
-      for (const handler of turnEndHandlers) {
-        await handler({}, mockCtx);
-      }
-
-      // State did not change because thinking_level_select was ignored, so appendEntry should not be called
-      expect(mockPi.appendEntry).not.toHaveBeenCalled();
     });
 
     it('should ignore thinking_level_select when ctx.model does not match the active router profile', async () => {
@@ -581,9 +506,6 @@ describe('index.ts (orchestrator)', () => {
         'warning',
       );
 
-      // Should call setHiddenThinkingLabel
-      expect(mockCtx.ui.setHiddenThinkingLabel).toHaveBeenCalled();
-
       // routerEnabled should be false
       expect(mockPi.appendEntry).toHaveBeenCalledWith(
         'router-state',
@@ -624,45 +546,6 @@ describe('index.ts (orchestrator)', () => {
           pinByProfile: expect.objectContaining({ balanced: 'medium' }),
         }),
       );
-    });
-
-    it('should sync thinking level when lastDecision exists on successful restore', async () => {
-      routerExtension(mockPi);
-
-      const mockCtx = buildMockCtx();
-      const decision = {
-        profile: 'balanced',
-        tier: 'high' as const,
-        phase: 'planning' as const,
-        targetProvider: 'openai',
-        targetModelId: 'gpt-4o',
-        targetLabel: 'openai/gpt-4o',
-        reasoning: 'test',
-        thinking: 'high' as const,
-        timestamp: Date.now(),
-      };
-      mockCtx.sessionManager.getBranch = () => [
-        {
-          type: 'custom',
-          customType: 'router-state',
-          data: {
-            enabled: true,
-            selectedProfile: 'balanced',
-            pinByProfile: {},
-            thinkingByProfile: {},
-            lastDecision: decision,
-            timestamp: Date.now(),
-          },
-        },
-      ];
-
-      const sessionStartHandlers = eventListeners['session_start'] || [];
-      for (const handler of sessionStartHandlers) {
-        await handler({}, mockCtx);
-      }
-
-      // setModel succeeds (default mock), lastDecision exists => should sync thinking level
-      expect(mockPi.setThinkingLevel).toHaveBeenCalledWith('high');
     });
   });
 

@@ -1,15 +1,10 @@
-import { streamSimple } from '@earendil-works/pi-ai/compat';
 import {
-  normalizeContext,
-  type Api,
   type ClassifierApi,
   type ClassifierContext,
   type ClassifierModel,
   type Context,
   type ImageContent,
   type Message,
-  type Model,
-  type SimpleStreamOptions,
 } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
@@ -20,7 +15,6 @@ import type {
   RoutingRule,
   RouterThinkingByTier,
   RouterModelRegistry,
-  ResolvedModelRequest,
   ClassifierDecisionResult,
 } from './types';
 import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
@@ -430,59 +424,42 @@ export const decideRouting = (
   return decision;
 };
 
-const hasNonEmptyHeaders = (
-  headers: Record<string, string | null> | undefined,
-): boolean =>
-  headers !== undefined &&
-  Object.values(headers).some((v) => typeof v === 'string' && v.length > 0);
+const MAX_CLASSIFIER_IMAGES = 4;
+const ASSET_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg']);
+const STANDARD_IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+]);
 
-export const resolveModelRequestAuth = async (
-  model: Model<Api>,
-  registry: RouterModelRegistry,
-): Promise<ResolvedModelRequest> => {
-  const auth = await registry.getApiKeyAndHeaders(model);
-  if (!auth.ok) {
-    return {
-      ok: false,
-      error: `Auth failed for routed model: ${model.provider}/${model.id}: ${auth.error}`,
-    };
+export const selectClassifierImages = (
+  classifierModel: ClassifierModel<ClassifierApi>,
+  images: readonly ImageContent[],
+): ImageContent[] => {
+  if (!classifierModel.input?.includes('image') || images.length === 0) {
+    return [];
   }
-  const headers =
-    model.headers || auth.headers
-      ? { ...model.headers, ...auth.headers }
-      : undefined;
-  if (!auth.apiKey && !hasNonEmptyHeaders(headers)) {
-    return {
-      ok: false,
-      error: `No API key for routed model: ${model.provider}/${model.id}`,
-    };
-  }
-  return {
-    ok: true,
-    model: auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
-    streamOptions: {
-      apiKey: auth.apiKey,
-      headers,
-      ...(auth.env ? { env: auth.env } : {}),
-    },
-  };
-};
 
-export const streamWithModel = (
-  model: Model<Api>,
-  context: Context,
-  registry: RouterModelRegistry,
-  options: SimpleStreamOptions,
-) => {
-  const providerConfig = registry.getRegisteredProviderConfig?.(model.provider);
-  const customStreamSimple =
-    providerConfig?.streamSimple &&
-    (!providerConfig.api || providerConfig.api === model.api)
-      ? providerConfig.streamSimple
-      : undefined;
-  return customStreamSimple
-    ? customStreamSimple(model, normalizeContext(context), options)
-    : streamSimple(model, context, options);
+  const usesAssetFormat =
+    (classifierModel.api === 'typesafe-system-one' &&
+      (classifierModel.compat?.imageInput ??
+        (classifierModel.provider === 'openrouter' ||
+        classifierModel.baseUrl?.includes('openrouter.ai')
+          ? 'state-image-urls'
+          : 'assets')) === 'assets') ||
+    (classifierModel.api === 'cloudflare-workers-ai-system-one' &&
+      (classifierModel.compat?.imageInput ??
+        (classifierModel.id.startsWith('@cf/cloudflare/clef')
+          ? 'images'
+          : 'assets')) === 'assets');
+
+  const allowedMimeTypes = usesAssetFormat
+    ? ASSET_IMAGE_MIME_TYPES
+    : STANDARD_IMAGE_MIME_TYPES;
+
+  return images
+    .filter((img) => allowedMimeTypes.has(img.mimeType))
+    .slice(0, MAX_CLASSIFIER_IMAGES);
 };
 
 export const runNativeClassifier = async (
@@ -514,11 +491,12 @@ export const runNativeClassifier = async (
 
   const promptText = getLastUserText(context);
   const historyText = getRecentConversationText(context, 4);
-  const userImages = classifierModel.input?.includes('image')
-    ? extractLastUserImages(context)
-    : [];
+  const userImages = selectClassifierImages(
+    classifierModel,
+    extractLastUserImages(context),
+  );
 
-  const classifierContext: ClassifierContext = {
+  const baseContext: ClassifierContext = {
     state: {
       prompt: promptText.slice(0, 16_000),
       ...(historyText
@@ -526,7 +504,6 @@ export const runNativeClassifier = async (
         : {}),
       ...(currentPhase ? { currentPhase } : {}),
     },
-    ...(userImages.length > 0 ? { images: userImages } : {}),
     questions: {
       tier: {
         type: 'choice',
@@ -537,11 +514,30 @@ export const runNativeClassifier = async (
     },
   };
 
-  const result = await modelRegistry.classify(
+  const options = signal ? { signal } : undefined;
+  let result = await modelRegistry.classify(
     classifierModel,
-    classifierContext,
-    signal ? { signal } : undefined,
+    userImages.length > 0
+      ? { ...baseContext, images: userImages }
+      : baseContext,
+    options,
   );
+  let totalCost = result.usage?.cost?.total ?? 0;
+
+  // Retry text-only if image classification failed (e.g. experimental endpoint or proxy rejection)
+  if (
+    result.stopReason === 'error' &&
+    userImages.length > 0 &&
+    promptText.length > 0
+  ) {
+    result = await modelRegistry.classify(
+      classifierModel,
+      baseContext,
+      options,
+    );
+    totalCost += result.usage?.cost?.total ?? 0;
+  }
+
   if (result.stopReason !== 'stop') return undefined;
 
   const answer = result.answers.tier;
@@ -576,12 +572,11 @@ export const runNativeClassifier = async (
     isRouterTier(answer.choice) && selectedTier !== answer.choice
       ? ` [phase-biased from ${answer.choice}]`
       : '';
-  const cost = result.usage?.cost?.total;
 
   return {
     tier: selectedTier,
     reasoning: `${classifierModel.provider}/${classifierModel.id} selected ${selectedTier}${probSuffix}${biasSuffix}.`,
-    ...(typeof cost === 'number' && cost > 0 ? { cost } : {}),
+    ...(totalCost > 0 ? { cost: totalCost } : {}),
   };
 };
 
@@ -608,6 +603,7 @@ export const runClassifier = async (
     if (classifierModelRef === 'auto') return undefined;
 
     // 2. Fall back to prompt-based classification on a chat LLM
+    if (!modelRegistry.streamSimple) return undefined;
     const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
     const model = modelRegistry.find(provider, modelId);
     if (!model) return undefined;
@@ -645,26 +641,10 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
     const reasoningOption =
       model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
 
-    let stream;
-    if (modelRegistry.streamSimple) {
-      stream = modelRegistry.streamSimple(model, classifierContext, {
-        ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-        ...(signal ? { signal } : {}),
-      });
-    } else {
-      const resolved = await resolveModelRequestAuth(model, modelRegistry);
-      if (!resolved.ok) return undefined;
-      stream = streamWithModel(
-        resolved.model,
-        classifierContext,
-        modelRegistry,
-        {
-          ...resolved.streamOptions,
-          ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-          ...(signal ? { signal } : {}),
-        },
-      );
-    }
+    const stream = modelRegistry.streamSimple(model, classifierContext, {
+      ...(reasoningOption ? { reasoning: reasoningOption } : {}),
+      ...(signal ? { signal } : {}),
+    });
 
     let fullText = '';
     let streamCost: number | undefined;

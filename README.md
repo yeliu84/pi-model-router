@@ -8,7 +8,7 @@ Smart per-turn model router extension for the [pi-coding-agent](https://github.c
 - **Per-Turn & Request-Aware Routing**: Intelligently chooses between `high`, `medium`, and `low` tiers on new user turns, stays sticky on tool-result continuations to preserve prompt caches and thinking signatures, routes background `direct` requests (like compaction summaries) cleanly, and steps through fallback chains on retries.
 - **Task-Aware Heuristics**: Detects planning vs. implementation vs. lightweight tasks using keyword analysis, word count, and conversation history.
 - **Advanced Controls**: Includes built-in support for:
-  - **Native Classifier & LLM Intent Classification**: Supports Pi's native [classifier models](https://pi.dev/docs/latest/models#use-classifier-models) (`"auto"`, TypeSafe Jev, Cloudflare Clef, OpenAI GPT-6 Luna with image support, and `llama.cpp` decision/logprob classifiers) with probability-aware phase bias, as well as standard chat LLMs.
+  - **Native Classifier & LLM Intent Classification**: Supports Pi's native [classifier models](https://pi.dev/docs/latest/models#use-classifier-models) (`"auto"`, TypeSafe Jev, Cloudflare Clef / Clef Omni, OpenAI GPT-6 Luna — with image input support — and `llama.cpp` decision/logprob classifiers) with probability-aware phase bias, as well as standard chat LLMs.
   - **Custom Rules**: Define keyword-based tier overrides for specific patterns (e.g., `deploy` → `high`).
   - **Cost Budgeting**: Set a session spend limit; high tier downgrades to medium once exceeded.
   - **Fallback Chains**: Automatic fallback to alternative models if the primary model is unavailable, lacks credentials, or fails on retry.

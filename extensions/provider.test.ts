@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   registerRouterProvider,
-  waitForRegistry,
   extractUncountedMessageCost,
   markMessageCostCounted,
   type RouterProviderState,
@@ -57,16 +56,12 @@ const createAssistantMsg = (text: string, totalCost = 0): AssistantMessage => ({
 
 interface TestExtensionContext {
   modelRegistry?: RouterModelRegistry;
-  ui?: {
-    setHiddenThinkingLabel?: (label?: string) => void;
-  };
 }
 
 interface TestProviderState extends RouterProviderState<TestExtensionContext> {
   currentConfig: RouterConfig;
   currentModelRegistry: RouterModelRegistry | undefined;
   lastExtensionContext: TestExtensionContext | undefined;
-  registryTimeoutMs?: number;
 }
 
 describe('provider.ts (virtual models)', () => {
@@ -138,11 +133,7 @@ describe('provider.ts (virtual models)', () => {
         }
         return undefined;
       },
-      getApiKeyAndHeaders: async () => ({
-        ok: true,
-        apiKey: 'test-key',
-        headers: {},
-      }),
+      hasConfiguredAuth: () => true,
     };
 
     mockState = {
@@ -165,7 +156,6 @@ describe('provider.ts (virtual models)', () => {
       recordDebugDecision: vi.fn(),
       getThinkingOverride: vi.fn().mockReturnValue(undefined),
       updateStatus: vi.fn(),
-      syncPiThinkingLevel: vi.fn(),
     };
   });
 
@@ -374,15 +364,9 @@ describe('provider.ts (virtual models)', () => {
       );
     });
 
-    it('should fall back immediately when primary model is missing from registry or fails auth', async () => {
-      mockState.currentModelRegistry!.getApiKeyAndHeaders = async (
-        model: Model<Api>,
-      ) => {
-        if (model.id === 'gpt-4o-mini') {
-          return { ok: false, error: 'auth-error' };
-        }
-        return { ok: true, apiKey: 'fallback-key', headers: {} };
-      };
+    it('should fall back immediately when primary model is missing from registry or lacks credentials', async () => {
+      mockState.currentModelRegistry!.hasConfiguredAuth = (model: Model<Api>) =>
+        model.id !== 'gpt-4o-mini';
 
       registerRouterProvider(mockPi, mockState, mockActions);
       const vm = registeredVirtualModels.get('router/balanced')!;
@@ -443,17 +427,16 @@ describe('provider.ts (virtual models)', () => {
       );
     });
 
-    it('should throw when registry never becomes available', async () => {
+    it('should throw when registry is unavailable', async () => {
       mockState.currentModelRegistry = undefined;
       mockState.lastExtensionContext = {};
-      (mockState as { registryTimeoutMs?: number }).registryTimeoutMs = 50;
 
       registerRouterProvider(mockPi, mockState, mockActions);
       const vm = registeredVirtualModels.get('router/balanced')!;
 
       await expect(
         vm.route(buildRequest(), mockState.lastExtensionContext),
-      ).rejects.toThrow('timed out');
+      ).rejects.toThrow('unavailable');
       expect(mockActions.persistState).toHaveBeenCalled();
     });
 
@@ -472,27 +455,6 @@ describe('provider.ts (virtual models)', () => {
           mockState.lastExtensionContext!,
         ),
       ).rejects.toThrow('Unknown router profile');
-    });
-
-    it('should override targetModel.baseUrl with auth.baseUrl when resolving candidate', async () => {
-      mockState.currentModelRegistry!.getApiKeyAndHeaders = async () => ({
-        ok: true,
-        apiKey: 'copilot-oauth-token',
-        headers: {},
-        baseUrl: 'https://api.enterprise.githubcopilot.com',
-      });
-
-      registerRouterProvider(mockPi, mockState, mockActions);
-      const vm = registeredVirtualModels.get('router/balanced')!;
-
-      const route = await vm.route(
-        buildRequest(),
-        mockState.lastExtensionContext!,
-      );
-
-      expect(route.model.baseUrl).toBe(
-        'https://api.enterprise.githubcopilot.com',
-      );
     });
 
     it('should clamp thinkingLevel to off when target model does not support reasoning', async () => {
@@ -639,7 +601,7 @@ describe('provider.ts (virtual models)', () => {
   });
 
   describe('cost tracking helpers', () => {
-    it('should count each assistant message object only once', () => {
+    it('should count each assistant and toolResult message object only once, including turn_end events', () => {
       const msg = createAssistantMsg('resp', 0.012);
       expect(extractUncountedMessageCost(msg)).toBe(0.012);
       expect(extractUncountedMessageCost(msg)).toBe(0);
@@ -647,34 +609,39 @@ describe('provider.ts (virtual models)', () => {
       const preCounted = createAssistantMsg('old', 0.05);
       markMessageCostCounted(preCounted);
       expect(extractUncountedMessageCost(preCounted)).toBe(0);
-    });
-  });
 
-  describe('waitForRegistry', () => {
-    it('should return registry immediately if already available', async () => {
-      const mockRegistry = { find: vi.fn() };
-      const state = { currentModelRegistry: mockRegistry };
-      const result = await waitForRegistry(state, 1000);
-      expect(result).toBe(mockRegistry);
-    });
-
-    it('should wait and return registry when it becomes available', async () => {
-      const mockRegistry = { find: vi.fn() };
-      const state: { currentModelRegistry: typeof mockRegistry | undefined } = {
-        currentModelRegistry: undefined,
+      const toolResultWithUsage = {
+        role: 'toolResult',
+        toolCallId: 'c1',
+        toolName: 'codemode',
+        content: [{ type: 'text', text: 'classified' }],
+        isError: false,
+        usage: {
+          input: 1000,
+          output: 10,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 1010,
+          cost: {
+            input: 0.004,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.004,
+          },
+        },
+        timestamp: Date.now(),
       };
-      setTimeout(() => {
-        state.currentModelRegistry = mockRegistry;
-      }, 50);
-
-      const result = await waitForRegistry(state, 1000);
-      expect(result).toBe(mockRegistry);
-    });
-
-    it('should return undefined after timeout if registry never becomes available', async () => {
-      const state = { currentModelRegistry: undefined };
-      const result = await waitForRegistry(state, 100);
-      expect(result).toBeUndefined();
+      const turnEndMsg = createAssistantMsg('turn-end', 0.01);
+      expect(
+        extractUncountedMessageCost({
+          message: turnEndMsg,
+          toolResults: [toolResultWithUsage],
+        }),
+      ).toBeCloseTo(0.014);
+      // Subsequent check should not double-count either message or toolResult
+      expect(extractUncountedMessageCost(turnEndMsg)).toBe(0);
+      expect(extractUncountedMessageCost(toolResultWithUsage)).toBe(0);
     });
   });
 });

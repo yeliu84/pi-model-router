@@ -1,5 +1,4 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   type RouterConfig,
   type RouterExtensionAPI,
@@ -56,7 +55,6 @@ const routerExtension = <
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
   let isInternalModelSwitch = false;
-  let isInternalThinkingChange = false;
 
   const setModelInternally = async (
     model: NonNullable<ExtensionContext['model']>,
@@ -69,17 +67,6 @@ const routerExtension = <
       return false;
     } finally {
       isInternalModelSwitch = false;
-    }
-  };
-
-  const setThinkingLevelInternally = (level: ThinkingLevel) => {
-    isInternalThinkingChange = true;
-    try {
-      pi.setThinkingLevel(level);
-    } catch {
-      // Extension context may be stale after session teardown.
-    } finally {
-      isInternalThinkingChange = false;
     }
   };
 
@@ -141,7 +128,6 @@ const routerExtension = <
 
   const actions = {
     persistState,
-    syncPiThinkingLevel: setThinkingLevelInternally,
     updateStatus: (ctx: TCtx) =>
       updateStatus(
         ctx,
@@ -206,7 +192,6 @@ const routerExtension = <
 
       // Ensure the provider is registered with current capacities for this profile
       actions.registerRouterProvider();
-      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const routerModel = ctx.modelRegistry.find('router', profileName);
       if (!routerModel) {
@@ -278,7 +263,6 @@ const routerExtension = <
           recordDebugDecision,
           getThinkingOverride,
           updateStatus: actions.updateStatus,
-          syncPiThinkingLevel: setThinkingLevelInternally,
         },
       );
     },
@@ -291,9 +275,6 @@ const routerExtension = <
     currentModelRegistry = ctx.modelRegistry;
     currentCwd = ctx.cwd;
     actions.reloadConfig(ctx);
-
-    // Give the registry a moment to synchronize after re-registration
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
     routerEnabled = ctx.model?.provider === 'router';
     selectedProfile =
@@ -368,9 +349,6 @@ const routerExtension = <
             'warning',
           );
           routerEnabled = false;
-        } else if (lastDecision) {
-          // Sync pi's thinking level display with the router's last decision
-          setThinkingLevelInternally(lastDecision.thinking);
         }
       } else {
         ctx.ui.notify(
@@ -378,10 +356,7 @@ const routerExtension = <
           'warning',
         );
         routerEnabled = false;
-        ctx.ui.setHiddenThinkingLabel?.();
       }
-    } else {
-      ctx.ui.setHiddenThinkingLabel?.();
     }
 
     persistState();
@@ -480,8 +455,6 @@ const routerExtension = <
   });
 
   pi.on('model_select', async (event, ctx) => {
-    // Ensure the model registry is captured even if session_start hasn't fired
-    // (e.g. in subagent contexts spawned by pi-dynamic-workflows).
     ensureInitializedFromContext(ctx);
     if (!isInitialized || isInternalModelSwitch) return;
     if (event.model.provider === 'router') {
@@ -491,23 +464,11 @@ const routerExtension = <
         return;
       }
 
-      // If the selected model has stale capacities (e.g. from the initial registration),
-      // re-apply the model from the registry to force a TUI refresh.
-      const registryModel = ctx.modelRegistry.find('router', profileName);
-      if (
-        registryModel &&
-        (registryModel.contextWindow !== event.model.contextWindow ||
-          registryModel.maxTokens !== event.model.maxTokens)
-      ) {
-        await setModelInternally(registryModel);
-      }
-
       routerEnabled = true;
       selectedProfile = profileName;
     } else {
       routerEnabled = false;
       lastNonRouterModel = `${event.model.provider}/${event.model.id}`;
-      ctx.ui.setHiddenThinkingLabel?.();
     }
     persistState();
     actions.updateStatus(ctx);
@@ -518,12 +479,6 @@ const routerExtension = <
     if (routerEnabled) {
       accumulatedCost += extractUncountedMessageCost(event);
     }
-    if (routerEnabled && selectedProfile && ctx.model?.provider !== 'router') {
-      const routerModel = ctx.modelRegistry.find('router', selectedProfile);
-      if (routerModel) {
-        await setModelInternally(routerModel);
-      }
-    }
     persistState();
     actions.updateStatus(ctx);
   });
@@ -531,7 +486,7 @@ const routerExtension = <
   pi.on('thinking_level_select', (event, ctx) => {
     ensureInitializedFromContext(ctx);
     if (!isInitialized || !routerEnabled || !selectedProfile) return;
-    if (isInternalThinkingChange || isInternalModelSwitch) return;
+    if (isInternalModelSwitch) return;
     if (ctx.model?.provider !== 'router' || ctx.model?.id !== selectedProfile) {
       return;
     }

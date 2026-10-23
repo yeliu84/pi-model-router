@@ -53,6 +53,13 @@ export const formatModelRef = (ref: string | undefined): string => {
   return ref ?? 'none';
 };
 
+export const formatSessionCost = (
+  accumulatedCost: number,
+  maxSessionBudget?: number,
+): string =>
+  `$${accumulatedCost.toFixed(4)}` +
+  (maxSessionBudget ? ` / $${maxSessionBudget.toFixed(2)}` : '');
+
 export const formatUnsupportedThinkingWarning = (
   scope: RouterTier | 'all',
   level: ThinkingLevel,
@@ -110,10 +117,7 @@ export const updateStatus = (
     `Router: ${routerEnabled ? 'enabled' : 'disabled'}`,
     `Profile: ${statusProfile}${activeRouterProfile ? ' (active)' : ''}`,
     `Pin: ${activePin ?? 'auto'}`,
-    `Cost: $${accumulatedCost.toFixed(4)}` +
-      (currentConfig.maxSessionBudget
-        ? ` / $${currentConfig.maxSessionBudget.toFixed(2)}`
-        : ''),
+    `Cost: ${formatSessionCost(accumulatedCost, currentConfig.maxSessionBudget)}`,
   ];
   if (lastDecision && lastDecision.profile === statusProfile) {
     const effectiveThinking = getEffectiveThinking(

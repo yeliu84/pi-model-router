@@ -17,7 +17,12 @@ import type {
   RouterModelRegistry,
   ClassifierDecisionResult,
 } from './types';
-import { parseCanonicalModelRef, isRouterTier, ROUTER_TIERS } from './config';
+import {
+  parseCanonicalModelRef,
+  findModelByRef,
+  isRouterTier,
+  ROUTER_TIERS,
+} from './config';
 
 const TIER_CRITERIA: Record<RouterTier, string> = {
   high: 'Architecture, design, planning, tradeoff analysis, broad debugging, large refactors, or codebase research',
@@ -42,19 +47,6 @@ export const extractTextFromContent = (
     })
     .filter(Boolean)
     .join('\n');
-};
-
-export const extractMessageText = (message: Message): string => {
-  const baseText = extractTextFromContent(message.content);
-  if (message.role !== 'system' || !message.sections) {
-    return baseText;
-  }
-  const sectionText = Object.values(message.sections)
-    .filter(
-      (value): value is string => typeof value === 'string' && value.length > 0,
-    )
-    .join('\n\n');
-  return [baseText, sectionText].filter(Boolean).join('\n\n');
 };
 
 export const getLastUserText = (context: Context): string => {
@@ -604,8 +596,7 @@ export const runClassifier = async (
 
     // 2. Fall back to prompt-based classification on a chat LLM
     if (!modelRegistry.streamSimple) return undefined;
-    const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
-    const model = modelRegistry.find(provider, modelId);
+    const model = findModelByRef(classifierModelRef, modelRegistry);
     if (!model) return undefined;
 
     const promptText = getLastUserText(context);

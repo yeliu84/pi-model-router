@@ -12,49 +12,31 @@ import routerExtension from './index';
 const _extensionFactoryTypeCheck: ExtensionFactory = routerExtension;
 void _extensionFactoryTypeCheck;
 
-vi.mock('./config', () => ({
-  loadRouterConfig: () => ({
-    config: {
-      profiles: {
-        balanced: {
-          high: { model: 'openai/gpt-4o' },
-          medium: { model: 'openai/gpt-4o-mini' },
+vi.mock('./config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./config')>();
+  return {
+    ...actual,
+    loadRouterConfig: () => ({
+      config: {
+        profiles: {
+          balanced: {
+            high: { model: 'openai/gpt-4o' },
+            medium: { model: 'openai/gpt-4o-mini' },
+          },
         },
       },
-    },
-    warnings: [],
-  }),
-  profileNames: () => ['balanced'],
-  resolveProfileName: (_config: unknown, name: unknown) =>
-    name === 'balanced' ? 'balanced' : undefined,
-  parseCanonicalModelRef: (_ref: string) => ({
-    provider: 'openai',
-    modelId: 'gpt-4o',
-  }),
-  resolveContextWindow: () => 100000,
-  resolveMaxTokens: () => 4000,
-  resolveThinkingLevels: () => undefined,
-  collectProfileThinkingLevels: () => new Set<string>(),
-  getUnsupportedTiers: (): string[] => [],
-  ROUTER_TIERS: ['high', 'medium', 'low'] as const,
-  ROUTER_PIN_VALUES: ['auto', 'high', 'medium', 'low'] as const,
-  DEFAULT_THINKING_LEVELS: ['high', 'medium', 'low'] as const,
-  THINKING_LEVELS: [
-    'off',
-    'minimal',
-    'low',
-    'medium',
-    'high',
-    'xhigh',
-    'max',
-  ] as const,
-  isRouterTier: (v: unknown) => v === 'high' || v === 'medium' || v === 'low',
-  isThinkingLevel: (v: unknown) =>
-    typeof v === 'string' &&
-    ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(v),
-  isObjectRecord: (v: unknown): v is Record<string, unknown> =>
-    typeof v === 'object' && v !== null && !Array.isArray(v),
-}));
+      warnings: [],
+    }),
+    profileNames: () => ['balanced'],
+    resolveProfileName: (_config: unknown, name: unknown) =>
+      name === 'balanced' ? 'balanced' : undefined,
+    resolveContextWindow: () => 100000,
+    resolveMaxTokens: () => 4000,
+    resolveThinkingLevels: () => undefined,
+    collectProfileThinkingLevels: () => new Set<string>(),
+    getUnsupportedTiers: (): string[] => [],
+  };
+});
 
 const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
   id: 'balanced',

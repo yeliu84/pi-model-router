@@ -14,7 +14,7 @@ import {
   loadRouterConfig,
   profileNames,
   resolveProfileName,
-  ROUTER_TIERS,
+  applyThinkingOverride,
   getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
@@ -36,22 +36,24 @@ const routerExtension = <
 >(
   pi: RouterExtensionAPI<TCtx>,
 ) => {
-  let currentConfig: RouterConfig = { profiles: {} };
-  let currentModelRegistry: RouterModelRegistry | undefined;
-  let currentCwd = process.cwd();
-  let lastDecision: RoutingDecision | undefined;
-  let debugEnabled = false;
-  let routerEnabled = false;
-  let selectedProfile: string | undefined = undefined;
-  let widgetEnabled = false;
-  let lastRegisteredModels = '';
-  let pinnedTierByProfile: RouterPinByProfile = {};
-  let thinkingByProfile: RouterThinkingByProfile = {};
-  let debugHistory: RoutingDecision[] = [];
-  let lastNonRouterModel: string | undefined;
-  let accumulatedCost = 0;
-  let lastExtensionContext: TCtx | undefined;
-  let lastConfigWarnings: string[] = [];
+  const state = {
+    currentConfig: { profiles: {} } as RouterConfig,
+    currentModelRegistry: undefined as RouterModelRegistry | undefined,
+    currentCwd: process.cwd(),
+    lastDecision: undefined as RoutingDecision | undefined,
+    debugEnabled: false,
+    routerEnabled: false,
+    selectedProfile: undefined as string | undefined,
+    widgetEnabled: false,
+    lastRegisteredModels: '',
+    pinnedTierByProfile: {} as RouterPinByProfile,
+    thinkingByProfile: {} as RouterThinkingByProfile,
+    debugHistory: [] as RoutingDecision[],
+    lastNonRouterModel: undefined as string | undefined,
+    accumulatedCost: 0,
+    lastExtensionContext: undefined as TCtx | undefined,
+    lastConfigWarnings: [] as string[],
+  };
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
   let isInternalModelSwitch = false;
@@ -71,10 +73,12 @@ const routerExtension = <
   };
 
   const recordDebugDecision = (decision: RoutingDecision) => {
-    debugHistory = [...debugHistory, decision].slice(-MAX_DEBUG_HISTORY);
-    if (debugEnabled && lastExtensionContext) {
+    state.debugHistory = [...state.debugHistory, decision].slice(
+      -MAX_DEBUG_HISTORY,
+    );
+    if (state.debugEnabled && state.lastExtensionContext) {
       try {
-        lastExtensionContext.ui.notify(
+        state.lastExtensionContext.ui.notify(
           `[router] ${formatDecision(decision)}`,
           'info',
         );
@@ -85,29 +89,29 @@ const routerExtension = <
   };
 
   const getThinkingOverride = (profileName: string, tier: RouterTier) => {
-    return thinkingByProfile[profileName]?.[tier];
+    return state.thinkingByProfile[profileName]?.[tier];
   };
 
   const persistState = () => {
-    const state = buildPersistedState(
-      routerEnabled,
-      selectedProfile,
-      pinnedTierByProfile,
-      thinkingByProfile,
-      debugEnabled,
-      widgetEnabled,
-      debugHistory,
-      lastDecision,
-      lastNonRouterModel,
-      accumulatedCost,
+    const persisted = buildPersistedState(
+      state.routerEnabled,
+      state.selectedProfile,
+      state.pinnedTierByProfile,
+      state.thinkingByProfile,
+      state.debugEnabled,
+      state.widgetEnabled,
+      state.debugHistory,
+      state.lastDecision,
+      state.lastNonRouterModel,
+      state.accumulatedCost,
     );
     const snapshot = JSON.stringify({
-      ...state,
+      ...persisted,
       timestamp: 0,
-      lastDecision: state.lastDecision
-        ? { ...state.lastDecision, timestamp: 0 }
+      lastDecision: persisted.lastDecision
+        ? { ...persisted.lastDecision, timestamp: 0 }
         : undefined,
-      debugHistory: state.debugHistory?.map((decision) => ({
+      debugHistory: persisted.debugHistory?.map((decision) => ({
         ...decision,
         timestamp: 0,
       })),
@@ -116,7 +120,7 @@ const routerExtension = <
       return;
     }
     try {
-      pi.appendEntry('router-state', state);
+      pi.appendEntry('router-state', persisted);
     } catch {
       // Defensive fallback: the session_shutdown event may fire after this
       // code runs (due to event loop ordering), so isActive can still be
@@ -128,33 +132,38 @@ const routerExtension = <
 
   const actions = {
     persistState,
+    recordDebugDecision,
+    getThinkingOverride,
     updateStatus: (ctx: TCtx) =>
       updateStatus(
         ctx,
-        routerEnabled,
-        selectedProfile,
-        pinnedTierByProfile,
-        thinkingByProfile,
-        lastDecision,
-        lastNonRouterModel,
-        accumulatedCost,
-        widgetEnabled,
-        currentConfig,
+        state.routerEnabled,
+        state.selectedProfile,
+        state.pinnedTierByProfile,
+        state.thinkingByProfile,
+        state.lastDecision,
+        state.lastNonRouterModel,
+        state.accumulatedCost,
+        state.widgetEnabled,
+        state.currentConfig,
       ),
     reloadConfig: (ctx?: TCtx, options?: { preserveDebug?: boolean }) => {
-      const loaded = loadRouterConfig(currentCwd);
-      currentConfig = loaded.config;
-      lastConfigWarnings = loaded.warnings;
+      const loaded = loadRouterConfig(state.currentCwd);
+      state.currentConfig = loaded.config;
+      state.lastConfigWarnings = loaded.warnings;
       if (!options?.preserveDebug) {
-        debugEnabled = currentConfig.debug ?? false;
+        state.debugEnabled = state.currentConfig.debug ?? false;
       }
-      selectedProfile = resolveProfileName(currentConfig, selectedProfile);
+      state.selectedProfile = resolveProfileName(
+        state.currentConfig,
+        state.selectedProfile,
+      );
       actions.registerRouterProvider();
       if (ctx) {
         actions.updateStatus(ctx);
-        if (lastConfigWarnings.length > 0) {
+        if (state.lastConfigWarnings.length > 0) {
           ctx.ui.notify(
-            `Router Configuration Warnings:\n${lastConfigWarnings.join('\n')}`,
+            `Router Configuration Warnings:\n${state.lastConfigWarnings.join('\n')}`,
             'warning',
           );
         }
@@ -164,9 +173,9 @@ const routerExtension = <
       if (ctx.model?.provider !== 'router') {
         return;
       }
-      if (currentConfig.profiles[ctx.model.id]) {
-        selectedProfile = ctx.model.id;
-        routerEnabled = true;
+      if (state.currentConfig.profiles[ctx.model.id]) {
+        state.selectedProfile = ctx.model.id;
+        state.routerEnabled = true;
         return;
       }
 
@@ -175,15 +184,15 @@ const routerExtension = <
         `Router profile "${ctx.model.id}" is no longer configured.`,
         'warning',
       );
-      routerEnabled = false;
-      selectedProfile = undefined;
+      state.routerEnabled = false;
+      state.selectedProfile = undefined;
     },
     switchToRouterProfile: async (
       profileName: string,
       ctx: TCtx,
       strict = true,
     ) => {
-      if (!currentConfig.profiles[profileName]) {
+      if (!state.currentConfig.profiles[profileName]) {
         if (strict) {
           ctx.ui.notify(`Unknown router profile: ${profileName}`, 'error');
         }
@@ -199,103 +208,52 @@ const routerExtension = <
         return false;
       }
       if (ctx.model && ctx.model.provider !== 'router') {
-        lastNonRouterModel = `${ctx.model.provider}/${ctx.model.id}`;
+        state.lastNonRouterModel = `${ctx.model.provider}/${ctx.model.id}`;
       }
       const success = await setModelInternally(routerModel);
       if (!success) {
         ctx.ui.notify(`Failed to switch to router/${profileName}`, 'error');
         return false;
       }
-      selectedProfile = profileName;
-      routerEnabled = true;
+      state.selectedProfile = profileName;
+      state.routerEnabled = true;
       persistState();
       actions.updateStatus(ctx);
       return true;
     },
     registerRouterProvider: () => {
-      registerRouterProvider(
-        pi,
-        {
-          get lastRegisteredModels() {
-            return lastRegisteredModels;
-          },
-          set lastRegisteredModels(v) {
-            lastRegisteredModels = v;
-          },
-          get currentConfig() {
-            return currentConfig;
-          },
-          get currentModelRegistry() {
-            return currentModelRegistry;
-          },
-          get lastExtensionContext() {
-            return lastExtensionContext;
-          },
-          get selectedProfile() {
-            return selectedProfile;
-          },
-          set selectedProfile(v) {
-            selectedProfile = v;
-          },
-          get routerEnabled() {
-            return routerEnabled;
-          },
-          set routerEnabled(v) {
-            routerEnabled = v;
-          },
-          get lastDecision() {
-            return lastDecision;
-          },
-          set lastDecision(v) {
-            lastDecision = v;
-          },
-          thinkingByProfile,
-          pinnedTierByProfile,
-          get accumulatedCost() {
-            return accumulatedCost;
-          },
-          set accumulatedCost(v) {
-            accumulatedCost = v;
-          },
-        },
-        {
-          persistState,
-          recordDebugDecision,
-          getThinkingOverride,
-          updateStatus: actions.updateStatus,
-        },
-      );
+      registerRouterProvider(pi, state, actions);
     },
   };
 
   actions.reloadConfig();
 
   const restoreStateFromSession = async (ctx: TCtx) => {
-    lastExtensionContext = ctx;
-    currentModelRegistry = ctx.modelRegistry;
-    currentCwd = ctx.cwd;
+    state.lastExtensionContext = ctx;
+    state.currentModelRegistry = ctx.modelRegistry;
+    state.currentCwd = ctx.cwd;
     actions.reloadConfig(ctx);
 
-    routerEnabled = ctx.model?.provider === 'router';
-    selectedProfile =
+    state.routerEnabled = ctx.model?.provider === 'router';
+    state.selectedProfile =
       ctx.model?.provider === 'router'
-        ? resolveProfileName(currentConfig, ctx.model.id)
-        : resolveProfileName(currentConfig, selectedProfile);
+        ? resolveProfileName(state.currentConfig, ctx.model.id)
+        : resolveProfileName(state.currentConfig, state.selectedProfile);
     // Clear in-place to keep references intact
-    for (const key of Object.keys(pinnedTierByProfile)) {
-      delete pinnedTierByProfile[key];
+    for (const key of Object.keys(state.pinnedTierByProfile)) {
+      delete state.pinnedTierByProfile[key];
     }
-    for (const key of Object.keys(thinkingByProfile)) {
-      delete thinkingByProfile[key];
+    for (const key of Object.keys(state.thinkingByProfile)) {
+      delete state.thinkingByProfile[key];
     }
-    widgetEnabled = false;
-    debugHistory = [];
-    accumulatedCost = 0;
-    lastNonRouterModel =
+    state.widgetEnabled = false;
+    state.debugHistory = [];
+    state.accumulatedCost = 0;
+    state.lastNonRouterModel =
       ctx.model && ctx.model.provider !== 'router'
         ? `${ctx.model.provider}/${ctx.model.id}`
-        : lastNonRouterModel;
-    lastDecision = undefined;
+        : state.lastNonRouterModel;
+    state.lastDecision = undefined;
 
     const entries: readonly CustomSessionEntry[] =
       ctx.sessionManager.getBranch();
@@ -313,49 +271,53 @@ const routerExtension = <
       .findLast((data) => isRouterPersistedState(data));
 
     if (isRouterPersistedState(savedState)) {
-      selectedProfile = resolveProfileName(
-        currentConfig,
+      state.selectedProfile = resolveProfileName(
+        state.currentConfig,
         savedState.selectedProfile,
       );
-      routerEnabled = savedState.enabled;
+      state.routerEnabled = savedState.enabled;
       if (savedState.pinByProfile) {
-        Object.assign(pinnedTierByProfile, savedState.pinByProfile);
+        Object.assign(state.pinnedTierByProfile, savedState.pinByProfile);
       }
       if (savedState.thinkingByProfile) {
-        Object.assign(thinkingByProfile, savedState.thinkingByProfile);
+        Object.assign(state.thinkingByProfile, savedState.thinkingByProfile);
       }
-      if (savedState.pinTier && selectedProfile) {
-        pinnedTierByProfile[selectedProfile] = savedState.pinTier;
+      if (savedState.pinTier && state.selectedProfile) {
+        state.pinnedTierByProfile[state.selectedProfile] = savedState.pinTier;
       }
-      debugEnabled = savedState.debugEnabled ?? debugEnabled;
-      widgetEnabled = savedState.widgetEnabled ?? widgetEnabled;
-      debugHistory = savedState.debugHistory
+      state.debugEnabled = savedState.debugEnabled ?? state.debugEnabled;
+      state.widgetEnabled = savedState.widgetEnabled ?? state.widgetEnabled;
+      state.debugHistory = savedState.debugHistory
         ? [...savedState.debugHistory].slice(-MAX_DEBUG_HISTORY)
         : [];
-      lastNonRouterModel = savedState.lastNonRouterModel ?? lastNonRouterModel;
-      accumulatedCost = savedState.accumulatedCost ?? 0;
-      lastDecision = savedState.lastDecision;
+      state.lastNonRouterModel =
+        savedState.lastNonRouterModel ?? state.lastNonRouterModel;
+      state.accumulatedCost = savedState.accumulatedCost ?? 0;
+      state.lastDecision = savedState.lastDecision;
     }
 
     await actions.ensureValidActiveRouterProfile(ctx);
 
-    if (routerEnabled && selectedProfile) {
-      const routerModel = ctx.modelRegistry.find('router', selectedProfile);
+    if (state.routerEnabled && state.selectedProfile) {
+      const routerModel = ctx.modelRegistry.find(
+        'router',
+        state.selectedProfile,
+      );
       if (routerModel) {
         const success = await setModelInternally(routerModel);
         if (!success) {
           ctx.ui.notify(
-            `Failed to restore router/${selectedProfile} after relaunch.`,
+            `Failed to restore router/${state.selectedProfile} after relaunch.`,
             'warning',
           );
-          routerEnabled = false;
+          state.routerEnabled = false;
         }
       } else {
         ctx.ui.notify(
-          `Unable to restore router/${selectedProfile}; model is unavailable.`,
+          `Unable to restore router/${state.selectedProfile}; model is unavailable.`,
           'warning',
         );
-        routerEnabled = false;
+        state.routerEnabled = false;
       }
     }
 
@@ -363,67 +325,15 @@ const routerExtension = <
     actions.updateStatus(ctx);
   };
 
-  registerCommands(
-    pi,
-    {
-      get currentConfig() {
-        return currentConfig;
-      },
-      get routerEnabled() {
-        return routerEnabled;
-      },
-      set routerEnabled(v) {
-        routerEnabled = v;
-      },
-      get selectedProfile() {
-        return selectedProfile;
-      },
-      set selectedProfile(v) {
-        selectedProfile = v;
-      },
-      pinnedTierByProfile,
-      thinkingByProfile,
-      get lastDecision() {
-        return lastDecision;
-      },
-      get lastNonRouterModel() {
-        return lastNonRouterModel;
-      },
-      set lastNonRouterModel(v) {
-        lastNonRouterModel = v;
-      },
-      get accumulatedCost() {
-        return accumulatedCost;
-      },
-      get debugEnabled() {
-        return debugEnabled;
-      },
-      set debugEnabled(v) {
-        debugEnabled = v;
-      },
-      get widgetEnabled() {
-        return widgetEnabled;
-      },
-      set widgetEnabled(v) {
-        widgetEnabled = v;
-      },
-      get debugHistory() {
-        return debugHistory;
-      },
-      get lastConfigWarnings() {
-        return lastConfigWarnings;
-      },
-    },
-    actions,
-  );
+  registerCommands(pi, state, actions);
 
   pi.on('session_start', async (_event, ctx) => {
     isInitialized = false;
     await restoreStateFromSession(ctx);
     isInitialized = true;
-    if (debugEnabled) {
+    if (state.debugEnabled) {
       ctx.ui.notify(
-        `Router initialized with profiles: ${profileNames(currentConfig).join(', ')}`,
+        `Router initialized with profiles: ${profileNames(state.currentConfig).join(', ')}`,
         'info',
       );
     }
@@ -441,10 +351,10 @@ const routerExtension = <
   // parent/subagent sessions, always overwriting would replace the parent's valid
   // registry with the subagent's — which goes stale when the subagent ends.
   const ensureInitializedFromContext = (ctx: TCtx) => {
-    if (!currentModelRegistry) {
-      currentModelRegistry = ctx.modelRegistry;
-      lastExtensionContext = ctx;
-      currentCwd = ctx.cwd;
+    if (!state.currentModelRegistry) {
+      state.currentModelRegistry = ctx.modelRegistry;
+      state.lastExtensionContext = ctx;
+      state.currentCwd = ctx.cwd;
       actions.reloadConfig(ctx);
     }
   };
@@ -458,17 +368,20 @@ const routerExtension = <
     ensureInitializedFromContext(ctx);
     if (!isInitialized || isInternalModelSwitch) return;
     if (event.model.provider === 'router') {
-      const profileName = resolveProfileName(currentConfig, event.model.id);
+      const profileName = resolveProfileName(
+        state.currentConfig,
+        event.model.id,
+      );
       if (!profileName) {
         ctx.ui.notify(`Unknown router profile: ${event.model.id}`, 'error');
         return;
       }
 
-      routerEnabled = true;
-      selectedProfile = profileName;
+      state.routerEnabled = true;
+      state.selectedProfile = profileName;
     } else {
-      routerEnabled = false;
-      lastNonRouterModel = `${event.model.provider}/${event.model.id}`;
+      state.routerEnabled = false;
+      state.lastNonRouterModel = `${event.model.provider}/${event.model.id}`;
     }
     persistState();
     actions.updateStatus(ctx);
@@ -476,8 +389,8 @@ const routerExtension = <
 
   pi.on('turn_end', async (event, ctx) => {
     ensureInitializedFromContext(ctx);
-    if (routerEnabled) {
-      accumulatedCost += extractUncountedMessageCost(event);
+    if (state.routerEnabled) {
+      state.accumulatedCost += extractUncountedMessageCost(event);
     }
     persistState();
     actions.updateStatus(ctx);
@@ -485,24 +398,28 @@ const routerExtension = <
 
   pi.on('thinking_level_select', (event, ctx) => {
     ensureInitializedFromContext(ctx);
-    if (!isInitialized || !routerEnabled || !selectedProfile) return;
+    if (!isInitialized || !state.routerEnabled || !state.selectedProfile)
+      return;
     if (isInternalModelSwitch) return;
-    if (ctx.model?.provider !== 'router' || ctx.model?.id !== selectedProfile) {
+    if (
+      ctx.model?.provider !== 'router' ||
+      ctx.model?.id !== state.selectedProfile
+    ) {
       return;
     }
 
     // User changed pi's thinking level (e.g. via shift+tab).
     // Apply as an all-tier thinking override for the active router profile.
-    if (!thinkingByProfile[selectedProfile]) {
-      thinkingByProfile[selectedProfile] = {};
-    }
-    for (const t of ROUTER_TIERS) {
-      thinkingByProfile[selectedProfile]![t] = event.level;
-    }
+    applyThinkingOverride(
+      state.thinkingByProfile,
+      state.selectedProfile,
+      'all',
+      event.level,
+    );
     persistState();
     actions.updateStatus(ctx);
     const unsupported = getUnsupportedTiers(
-      currentConfig.profiles[selectedProfile],
+      state.currentConfig.profiles[state.selectedProfile],
       event.level,
       ctx.modelRegistry,
     );

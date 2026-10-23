@@ -17,6 +17,7 @@ import type {
 import {
   profileNames,
   parseCanonicalModelRef,
+  findModelByRef,
   isObjectRecord,
   ROUTER_TIERS,
   THINKING_LEVELS,
@@ -78,24 +79,13 @@ export const extractUncountedMessageCost = (input: unknown): number => {
 const supportsReasoning = (
   profile: RouterConfig['profiles'][string],
   modelRegistry: RouterModelCapabilityLookup | undefined,
-): boolean => {
-  if (!modelRegistry) return false;
-
-  for (const tier of ROUTER_TIERS) {
-    const tierConfig = profile[tier];
-    if (!tierConfig) continue;
-    try {
-      const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
-      if (modelRegistry.find(provider, modelId)?.reasoning) {
-        return true;
-      }
-    } catch (_error) {
-      // ignore invalid model refs here; config normalization handles warnings
-    }
-  }
-
-  return false;
-};
+): boolean =>
+  Boolean(
+    modelRegistry &&
+    ROUTER_TIERS.some(
+      (tier) => findModelByRef(profile[tier]?.model, modelRegistry)?.reasoning,
+    ),
+  );
 
 const getTierModels = (
   profile: RouterConfig['profiles'][string],
@@ -427,15 +417,8 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
     }
 
     const imageAttached = hasImageAttachment(context);
-    const checkModelSupportsImage = (modelRef: string) => {
-      try {
-        const { provider, modelId } = parseCanonicalModelRef(modelRef);
-        const m = registry.find(provider, modelId);
-        return m?.input?.includes('image') ?? false;
-      } catch {
-        return false;
-      }
-    };
+    const checkModelSupportsImage = (modelRef: string) =>
+      findModelByRef(modelRef, registry)?.input?.includes('image') ?? false;
 
     if (
       imageAttached &&
@@ -597,7 +580,6 @@ export const registerRouterProvider = <TContext = ExtensionContext>(
     return {
       id: name,
       name: `Router ${name}`,
-      reasoning: hasReasoning,
       thinkingLevels,
       input: ['text', 'image'] as ('text' | 'image')[],
       contextWindow: maxContextWindow,
@@ -608,7 +590,7 @@ export const registerRouterProvider = <TContext = ExtensionContext>(
   const modelsKey = modelDefinitions
     .map(
       (m) =>
-        `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.reasoning}:${m.thinkingLevels.join('|')}`,
+        `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.thinkingLevels.join('|')}`,
     )
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;

@@ -18,13 +18,15 @@ import {
   ROUTER_TIERS,
   isRouterTier,
   isThinkingLevel,
-  parseCanonicalModelRef,
+  findModelByRef,
+  applyThinkingOverride,
   getUnsupportedTiers,
 } from './config';
 import {
   formatPinSummary,
   formatThinkingSummary,
   formatModelRef,
+  formatSessionCost,
   formatDecision,
   formatUnsupportedThinkingWarning,
 } from './ui';
@@ -186,10 +188,7 @@ export const registerCommands = <
       `Thinking overrides: ${formatThinkingSummary(state.thinkingByProfile)}`,
       `Widget: ${state.widgetEnabled ? 'on' : 'off'}`,
       `Phase bias: ${state.currentConfig.phaseBias}`,
-      `Session cost: $${state.accumulatedCost.toFixed(4)}` +
-        (state.currentConfig.maxSessionBudget
-          ? ` / $${state.currentConfig.maxSessionBudget.toFixed(2)}`
-          : ''),
+      `Session cost: ${formatSessionCost(state.accumulatedCost, state.currentConfig.maxSessionBudget)}`,
       `Available profiles: ${names}`,
       `Last non-router model: ${formatModelRef(state.lastNonRouterModel)}`,
       `Debug: ${state.debugEnabled ? 'on' : 'off'}`,
@@ -340,15 +339,12 @@ export const registerCommands = <
     }
 
     const nextLevel = levelValue === 'auto' ? undefined : levelValue;
-    const targetTiers = tier === 'all' ? ROUTER_TIERS : [tier];
-    const profileThinking = (state.thinkingByProfile[currentProfile] ??= {});
-    for (const t of targetTiers) {
-      if (nextLevel) profileThinking[t] = nextLevel;
-      else delete profileThinking[t];
-    }
-    if (Object.keys(profileThinking).length === 0) {
-      delete state.thinkingByProfile[currentProfile];
-    }
+    applyThinkingOverride(
+      state.thinkingByProfile,
+      currentProfile,
+      tier,
+      nextLevel,
+    );
 
     actions.persistState();
     actions.updateStatus(ctx);
@@ -379,10 +375,10 @@ export const registerCommands = <
       );
       return;
     }
-    const { provider, modelId } = parseCanonicalModelRef(
+    const targetModel = findModelByRef(
       state.lastNonRouterModel,
+      ctx.modelRegistry,
     );
-    const targetModel = ctx.modelRegistry.find(provider, modelId);
     if (!targetModel) {
       ctx.ui.notify(
         `Recorded non-router model is unavailable: ${state.lastNonRouterModel}`,

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   extractTextFromContent,
-  extractMessageText,
   getLastUserText,
   getRecentConversationText,
   countToolResults,
@@ -99,23 +98,6 @@ describe('routing.ts', () => {
       ];
       const result = extractTextFromContent(parts);
       expect(result).toBe('visible answer');
-    });
-  });
-
-  describe('extractMessageText', () => {
-    it('should include sections from system messages in TranscriptContext', () => {
-      const systemMessage: Message = {
-        role: 'system',
-        content: 'Base system instructions',
-        sections: {
-          tools: 'Available tools section',
-          removed: null,
-        },
-        timestamp: Date.now(),
-      };
-      expect(extractMessageText(systemMessage)).toBe(
-        'Base system instructions\n\nAvailable tools section',
-      );
     });
   });
 

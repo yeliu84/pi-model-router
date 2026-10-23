@@ -11,6 +11,7 @@ import type {
   ConfigLoadResult,
   ParsedConfigFile,
   RouterTier,
+  RouterThinkingByProfile,
   RoutingRule,
   ModelDefinition,
   ClassifierConfig,
@@ -510,18 +511,25 @@ export const resolveProfileName = (
   return undefined;
 };
 
-const findTierModel = (
-  tierConfig: RoutedTierConfig | undefined,
-  modelRegistry?: RouterModelCapabilityLookup,
-) => {
-  if (!tierConfig || !modelRegistry) return undefined;
+export const findModelByRef = <TModel>(
+  modelRef: string | undefined,
+  modelRegistry?: {
+    find: (provider: string, modelId: string) => TModel | undefined;
+  },
+): TModel | undefined => {
+  if (!modelRef || !modelRegistry) return undefined;
   try {
-    const { provider, modelId } = parseCanonicalModelRef(tierConfig.model);
+    const { provider, modelId } = parseCanonicalModelRef(modelRef);
     return modelRegistry.find(provider, modelId);
   } catch {
     return undefined;
   }
 };
+
+const findTierModel = (
+  tierConfig: RoutedTierConfig | undefined,
+  modelRegistry?: RouterModelCapabilityLookup,
+) => findModelByRef(tierConfig?.model, modelRegistry);
 
 /**
  * Resolve the effective context window for a specific tier at runtime,
@@ -632,6 +640,23 @@ export const getUnsupportedTiers = (
       level,
     );
   });
+
+export const applyThinkingOverride = (
+  thinkingByProfile: RouterThinkingByProfile,
+  profileName: string,
+  tier: RouterTier | 'all',
+  level: ThinkingLevel | undefined,
+): void => {
+  const targetTiers = tier === 'all' ? ROUTER_TIERS : [tier];
+  const profileThinking = (thinkingByProfile[profileName] ??= {});
+  for (const t of targetTiers) {
+    if (level) profileThinking[t] = level;
+    else delete profileThinking[t];
+  }
+  if (Object.keys(profileThinking).length === 0) {
+    delete thinkingByProfile[profileName];
+  }
+};
 
 /**
  * Clamps a requested thinking level to the nearest supported level

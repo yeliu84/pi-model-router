@@ -80,11 +80,10 @@ const supportsReasoning = (
   profile: RouterConfig['profiles'][string],
   modelRegistry: RouterModelCapabilityLookup | undefined,
 ): boolean =>
-  Boolean(
-    modelRegistry &&
-    ROUTER_TIERS.some(
-      (tier) => findModelByRef(profile[tier]?.model, modelRegistry)?.reasoning,
-    ),
+  ROUTER_TIERS.some((tier) =>
+    modelRegistry
+      ? Boolean(findModelByRef(profile[tier]?.model, modelRegistry)?.reasoning)
+      : Boolean(profile[tier] && profile[tier].reasoning !== false),
   );
 
 const getTierModels = (
@@ -155,6 +154,7 @@ export interface RouterProviderActions<TContext = ExtensionContext> {
     tier: RouterTier,
   ) => ThinkingLevel | undefined;
   updateStatus: (ctx: TContext) => void;
+  syncPiThinkingLevel: (level: ThinkingLevel) => void;
 }
 
 export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
@@ -505,6 +505,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
 
     const effectiveCtx = ctx ?? state.lastExtensionContext;
     try {
+      actions.syncPiThinkingLevel(effectiveThinking);
       if (effectiveCtx) {
         actions.updateStatus(effectiveCtx);
       }

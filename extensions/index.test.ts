@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type {
@@ -102,6 +103,7 @@ const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
   registerProvider: vi.fn(() => {}),
   registerCommand: vi.fn(() => {}),
   setModel: vi.fn(async () => true),
+  setThinkingLevel: vi.fn((_level: ThinkingLevel) => {}),
   appendEntry: vi.fn(() => {}),
   on: vi.fn((event: string, handler: RegisteredHandler) => {
     if (!eventListeners[event]) {
@@ -161,6 +163,7 @@ describe('index.ts (orchestrator)', () => {
     routerExtension(mockPi);
 
     const mockCtx = buildMockCtx();
+    mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
     mockCtx.sessionManager.getBranch = () => [
       {
         type: 'custom',
@@ -391,14 +394,73 @@ describe('index.ts (orchestrator)', () => {
 
       expect(mockPi.appendEntry).not.toHaveBeenCalled();
     });
+
+    it('should ignore async thinking_level_select echo emitted by syncPiThinkingLevel during routing (issue #29)', async () => {
+      const mockCtx = buildMockCtx();
+
+      // Simulate Pi's fire-and-forget `void this._extensionRunner.emit(...)`
+      // delayed by a microtask/timer (e.g. when another extension is loaded before pi-model-router)
+      mockPi.setThinkingLevel = vi.fn((level: ThinkingLevel) => {
+        setTimeout(() => {
+          const thinkingHandlers =
+            eventListeners['thinking_level_select'] || [];
+          for (const handler of thinkingHandlers) {
+            void handler({ level }, mockCtx);
+          }
+        }, 0);
+      });
+
+      routerExtension(mockPi);
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      const vmDef = (
+        mockPi.registerVirtualModel as unknown as {
+          mock: {
+            calls: Array<[{ route: (req: unknown, ctx: MockCtx) => unknown }]>;
+          };
+        }
+      ).mock.calls.at(-1)?.[0];
+      expect(vmDef).toBeDefined();
+
+      mockPi.appendEntry.mockClear();
+
+      await vmDef!.route(
+        {
+          model: { id: 'balanced', provider: 'router' },
+          thinkingLevel: 'high',
+          reason: 'user',
+          messages: [{ role: 'user', content: 'just reply yes' }],
+        },
+        mockCtx,
+      );
+
+      // Wait for async setTimeout(..., 0) echo to drain
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(mockPi.setThinkingLevel).toHaveBeenCalled();
+      const stateAppends = (
+        mockPi.appendEntry as unknown as {
+          mock: {
+            calls: Array<
+              [string, { thinkingByProfile: Record<string, unknown> }]
+            >;
+          };
+        }
+      ).mock.calls.filter(([type]) => type === 'router-state');
+      expect(stateAppends.at(-1)?.[1].thinkingByProfile).toEqual({});
+    });
   });
 
   describe('restoreStateFromSession edge cases', () => {
-    it('should handle fresh session with no saved router-state entries', async () => {
+    it('should handle fresh session with no saved router-state entries without calling setModel redundantly', async () => {
       routerExtension(mockPi);
 
       const mockCtx = buildMockCtx();
-      // Empty session
+      // Empty session, ctx.model is already router/balanced
       mockCtx.sessionManager.getBranch = () => [];
 
       const sessionStartHandlers = eventListeners['session_start'] || [];
@@ -406,14 +468,15 @@ describe('index.ts (orchestrator)', () => {
         await handler({}, mockCtx);
       }
 
-      // Should still set model (model is router/balanced by default)
-      expect(mockPi.setModel).toHaveBeenCalled();
+      // Should NOT call setModel when ctx.model is already router/balanced
+      expect(mockPi.setModel).not.toHaveBeenCalled();
       // Should persist initial state
       expect(mockPi.appendEntry).toHaveBeenCalledWith(
         'router-state',
         expect.objectContaining({
           enabled: true,
           selectedProfile: 'balanced',
+          thinkingByProfile: {},
         }),
       );
     });
@@ -423,6 +486,7 @@ describe('index.ts (orchestrator)', () => {
       routerExtension(mockPi);
 
       const mockCtx = buildMockCtx();
+      mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
       mockCtx.sessionManager.getBranch = () => [
         {
           type: 'custom',

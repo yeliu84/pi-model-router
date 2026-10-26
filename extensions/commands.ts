@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
 import type {
   RouterConfig,
@@ -71,6 +72,7 @@ export const registerCommands = <
       ctx: TCtx,
       strict?: boolean,
     ) => Promise<boolean>;
+    syncPiThinkingLevel: (level: ThinkingLevel) => void;
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
@@ -348,6 +350,11 @@ export const registerCommands = <
 
     actions.persistState();
     actions.updateStatus(ctx);
+    if (nextLevel) {
+      actions.syncPiThinkingLevel(nextLevel);
+    } else if (state.lastDecision) {
+      actions.syncPiThinkingLevel(state.lastDecision.thinking);
+    }
     if (nextLevel) {
       const unsupported = getUnsupportedTiers(
         state.currentConfig.profiles[currentProfile],

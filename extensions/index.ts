@@ -1,4 +1,5 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import {
   type RouterConfig,
   type RouterExtensionAPI,
@@ -57,10 +58,15 @@ const routerExtension = <
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
   let isInternalModelSwitch = false;
+  let internalThinkingChangeDepth = 0;
 
   const setModelInternally = async (
     model: NonNullable<ExtensionContext['model']>,
+    ctx: TCtx,
   ) => {
+    if (ctx.model?.provider === model.provider && ctx.model?.id === model.id) {
+      return true;
+    }
     isInternalModelSwitch = true;
     try {
       return await pi.setModel(model);
@@ -69,6 +75,19 @@ const routerExtension = <
       return false;
     } finally {
       isInternalModelSwitch = false;
+    }
+  };
+
+  const setThinkingLevelInternally = (level: ThinkingLevel) => {
+    internalThinkingChangeDepth++;
+    try {
+      pi.setThinkingLevel(level);
+    } catch {
+      // Extension context may be stale after session teardown.
+    } finally {
+      setTimeout(() => {
+        internalThinkingChangeDepth--;
+      }, 0);
     }
   };
 
@@ -134,6 +153,7 @@ const routerExtension = <
     persistState,
     recordDebugDecision,
     getThinkingOverride,
+    syncPiThinkingLevel: setThinkingLevelInternally,
     updateStatus: (ctx: TCtx) =>
       updateStatus(
         ctx,
@@ -210,7 +230,7 @@ const routerExtension = <
       if (ctx.model && ctx.model.provider !== 'router') {
         state.lastNonRouterModel = `${ctx.model.provider}/${ctx.model.id}`;
       }
-      const success = await setModelInternally(routerModel);
+      const success = await setModelInternally(routerModel, ctx);
       if (!success) {
         ctx.ui.notify(`Failed to switch to router/${profileName}`, 'error');
         return false;
@@ -304,13 +324,16 @@ const routerExtension = <
         state.selectedProfile,
       );
       if (routerModel) {
-        const success = await setModelInternally(routerModel);
+        const success = await setModelInternally(routerModel, ctx);
         if (!success) {
           ctx.ui.notify(
             `Failed to restore router/${state.selectedProfile} after relaunch.`,
             'warning',
           );
           state.routerEnabled = false;
+        } else if (state.lastDecision) {
+          // Sync pi's thinking level display with the router's last decision
+          setThinkingLevelInternally(state.lastDecision.thinking);
         }
       } else {
         ctx.ui.notify(
@@ -400,7 +423,7 @@ const routerExtension = <
     ensureInitializedFromContext(ctx);
     if (!isInitialized || !state.routerEnabled || !state.selectedProfile)
       return;
-    if (isInternalModelSwitch) return;
+    if (internalThinkingChangeDepth > 0 || isInternalModelSwitch) return;
     if (
       ctx.model?.provider !== 'router' ||
       ctx.model?.id !== state.selectedProfile

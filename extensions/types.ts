@@ -161,6 +161,7 @@ export interface RouterExtensionAPI<
     },
   ) => void;
   setModel: ExtensionAPI['setModel'];
+  setThinkingLevel: ExtensionAPI['setThinkingLevel'];
   appendEntry: ExtensionAPI['appendEntry'];
   on(
     event: 'session_start' | 'session_tree' | 'turn_start' | 'turn_end',

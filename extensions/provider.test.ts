@@ -156,6 +156,7 @@ describe('provider.ts (virtual models)', () => {
       recordDebugDecision: vi.fn(),
       getThinkingOverride: vi.fn().mockReturnValue(undefined),
       updateStatus: vi.fn(),
+      syncPiThinkingLevel: vi.fn(),
     };
   });
 
@@ -182,6 +183,15 @@ describe('provider.ts (virtual models)', () => {
       expect(vm!.provider).toBe('router');
       expect(vm!.id).toBe('balanced');
       expect(vm!.name).toBe('Router balanced');
+      expect(vm!.thinkingLevels).toEqual(['off', 'low', 'medium', 'high']);
+    });
+
+    it('should register configured thinkingLevels on initial load before currentModelRegistry is bound', () => {
+      mockState.currentModelRegistry = undefined;
+      registerRouterProvider(mockPi, mockState, mockActions);
+
+      const vm = registeredVirtualModels.get('router/balanced');
+      expect(vm).toBeDefined();
       expect(vm!.thinkingLevels).toEqual(['off', 'low', 'medium', 'high']);
     });
 

@@ -78,7 +78,8 @@ const routerExtension = <
     }
   };
 
-  const setThinkingLevelInternally = (level: ThinkingLevel) => {
+  const syncPiThinkingLevel = (level: ThinkingLevel | undefined) => {
+    if (!level) return;
     internalThinkingChangeDepth++;
     try {
       pi.setThinkingLevel(level);
@@ -153,7 +154,7 @@ const routerExtension = <
     persistState,
     recordDebugDecision,
     getThinkingOverride,
-    syncPiThinkingLevel: setThinkingLevelInternally,
+    syncPiThinkingLevel,
     updateStatus: (ctx: TCtx) =>
       updateStatus(
         ctx,
@@ -331,9 +332,9 @@ const routerExtension = <
             'warning',
           );
           state.routerEnabled = false;
-        } else if (state.lastDecision) {
+        } else {
           // Sync pi's thinking level display with the router's last decision
-          setThinkingLevelInternally(state.lastDecision.thinking);
+          syncPiThinkingLevel(state.lastDecision?.thinking);
         }
       } else {
         ctx.ui.notify(

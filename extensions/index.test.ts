@@ -98,7 +98,9 @@ type TriggerHandler = (
 ) => Promise<void> | void;
 
 const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
-  registerVirtualModel: vi.fn(() => {}),
+  registerVirtualModel: vi.fn<
+    RouterExtensionAPI<MockCtx>['registerVirtualModel']
+  >(() => {}),
   unregisterVirtualModel: vi.fn(() => {}),
   registerProvider: vi.fn(() => {}),
   registerCommand: vi.fn(() => {}),
@@ -417,23 +419,17 @@ describe('index.ts (orchestrator)', () => {
         await handler({}, mockCtx);
       }
 
-      const vmDef = (
-        mockPi.registerVirtualModel as unknown as {
-          mock: {
-            calls: Array<[{ route: (req: unknown, ctx: MockCtx) => unknown }]>;
-          };
-        }
-      ).mock.calls.at(-1)?.[0];
+      const vmDef = mockPi.registerVirtualModel.mock.lastCall?.[0];
       expect(vmDef).toBeDefined();
 
       mockPi.appendEntry.mockClear();
 
       await vmDef!.route(
         {
-          model: { id: 'balanced', provider: 'router' },
+          model: { id: 'balanced', provider: 'router' } as Model<Api>,
           thinkingLevel: 'high',
           reason: 'user',
-          messages: [{ role: 'user', content: 'just reply yes' }],
+          messages: [{ role: 'user', content: 'just reply yes', timestamp: 0 }],
         },
         mockCtx,
       );
@@ -442,16 +438,10 @@ describe('index.ts (orchestrator)', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(mockPi.setThinkingLevel).toHaveBeenCalled();
-      const stateAppends = (
-        mockPi.appendEntry as unknown as {
-          mock: {
-            calls: Array<
-              [string, { thinkingByProfile: Record<string, unknown> }]
-            >;
-          };
-        }
-      ).mock.calls.filter(([type]) => type === 'router-state');
-      expect(stateAppends.at(-1)?.[1].thinkingByProfile).toEqual({});
+      expect(mockPi.appendEntry).toHaveBeenLastCalledWith(
+        'router-state',
+        expect.objectContaining({ thinkingByProfile: {} }),
+      );
     });
   });
 

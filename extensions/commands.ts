@@ -72,7 +72,7 @@ export const registerCommands = <
       ctx: TCtx,
       strict?: boolean,
     ) => Promise<boolean>;
-    syncPiThinkingLevel: (level: ThinkingLevel) => void;
+    syncPiThinkingLevel: (level: ThinkingLevel | undefined) => void;
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
@@ -350,11 +350,7 @@ export const registerCommands = <
 
     actions.persistState();
     actions.updateStatus(ctx);
-    if (nextLevel) {
-      actions.syncPiThinkingLevel(nextLevel);
-    } else if (state.lastDecision) {
-      actions.syncPiThinkingLevel(state.lastDecision.thinking);
-    }
+    actions.syncPiThinkingLevel(nextLevel ?? state.lastDecision?.thinking);
     if (nextLevel) {
       const unsupported = getUnsupportedTiers(
         state.currentConfig.profiles[currentProfile],

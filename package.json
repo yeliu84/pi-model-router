@@ -1,6 +1,6 @@
 {
   "name": "@yeliu84/pi-model-router",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "type": "module",
   "files": [
     "extensions",

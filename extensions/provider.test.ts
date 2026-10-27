@@ -608,6 +608,239 @@ describe('provider.ts (virtual models)', () => {
       expect(directRoute.model.id).toBe('gpt-4o');
       expect(directRoute.thinkingLevel).toBe('high');
     });
+
+    it('should rotate through multiple fallbacks in order on consecutive retries and preserve fallback across same-tier user turns', async () => {
+      mockState.currentConfig.profiles.balanced.medium!.fallbacks = [
+        'google/gemini-1.5-flash',
+        'openai/gpt-4o-fallback-2',
+      ];
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      // Turn 1 initial user request -> primary model (openai/gpt-4o-mini)
+      const initialRoute = await vm.route(
+        buildRequest({
+          messages: [
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(initialRoute.model.id).toBe('gpt-4o-mini');
+
+      // Retry 1 after primary failed -> first fallback (google/gemini-1.5-flash)
+      const retry1 = await vm.route(
+        buildRequest({
+          reason: 'retry',
+          state: initialRoute.state,
+          failed: {
+            model: createTestModel({ provider: 'openai', id: 'gpt-4o-mini' }),
+            thinkingLevel: 'medium',
+            message: {
+              ...createAssistantMsg('', 0),
+              provider: 'openai',
+              model: 'gpt-4o-mini',
+              stopReason: 'error',
+              errorMessage: '429 Too Many Requests',
+            },
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(retry1.model.provider).toBe('google');
+      expect(retry1.model.id).toBe('gemini-1.5-flash');
+
+      // Turn 2 user request on same tier (medium, unpinned) -> sticks to working fallback (gemini-1.5-flash)
+      const turn2Route = await vm.route(
+        buildRequest({
+          reason: 'user',
+          state: retry1.state,
+          messages: [
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+            createAssistantMsg('fixed', 0.001),
+            {
+              role: 'user',
+              content: 'also update the test',
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(turn2Route.model.provider).toBe('google');
+      expect(turn2Route.model.id).toBe('gemini-1.5-flash');
+      expect(mockState.lastDecision?.isFallback).toBe(true);
+      expect(mockState.lastDecision?.reasoning).toContain(
+        'Preserved fallback google/gemini-1.5-flash for medium tier.',
+      );
+
+      // If gemini-1.5-flash now fails on Turn 2 -> advances to 2nd fallback (gpt-4o-fallback-2), NOT back to broken primary
+      const retry2 = await vm.route(
+        buildRequest({
+          reason: 'retry',
+          state: turn2Route.state,
+          failed: {
+            model: createTestModel({
+              provider: 'google',
+              id: 'gemini-1.5-flash',
+            }),
+            thinkingLevel: 'medium',
+            message: {
+              ...createAssistantMsg('', 0),
+              provider: 'google',
+              model: 'gemini-1.5-flash',
+              stopReason: 'error',
+              errorMessage: '503 Service Unavailable',
+            },
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(retry2.model.provider).toBe('openai');
+      expect(retry2.model.id).toBe('gpt-4o-fallback-2');
+    });
+
+    it('should auto-pin on first turn when autoPinFirstTurnDecision is enabled and allow unpinning back to dynamic routing', async () => {
+      mockState.currentConfig.autoPinFirstTurnDecision = true;
+      mockState.currentConfig.profiles.balanced.low = {
+        model: 'openai/gpt-4o-nano',
+        thinking: 'low',
+        resolvedContextWindow: 5000,
+        resolvedThinkingLevels: ['low', 'medium', 'high'],
+      };
+      mockState.currentConfig.classifierModel = { model: 'auto' };
+      const classifySpy = vi.fn().mockResolvedValue({
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        model: 'jev-latest',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'low',
+            probabilities: { high: 0.05, medium: 0.05, low: 0.9 },
+            confidence: 0.9,
+          },
+        },
+      });
+      mockState.currentModelRegistry!.getAvailableOfType = vi
+        .fn()
+        .mockResolvedValue([
+          {
+            type: 'classifier',
+            id: 'jev-latest',
+            name: 'Jev Latest',
+            api: 'typesafe-system-one',
+            provider: 'typesafe',
+            baseUrl: 'https://api.typesafe.ai',
+            input: ['text'],
+            contextWindow: 32000,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ]);
+      mockState.currentModelRegistry!.classify = classifySpy;
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      // Turn 1: classifier selects low tier -> auto-pins balanced to low
+      const turn1 = await vm.route(
+        buildRequest({
+          messages: [
+            {
+              role: 'user',
+              content: 'summarize this file',
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(turn1.model.id).toBe('gpt-4o-nano');
+      expect(mockState.pinnedTierByProfile.balanced).toBe('low');
+      expect(mockState.lastDecision?.reasoning).toContain(
+        '(Auto-pinned to low tier from first turn.)',
+      );
+      expect(classifySpy).toHaveBeenCalledTimes(1);
+
+      // Turn 2: complex architecture prompt stays pinned to low without calling classifier again
+      const turn2 = await vm.route(
+        buildRequest({
+          state: turn1.state,
+          messages: [
+            {
+              role: 'user',
+              content: 'summarize this file',
+              timestamp: Date.now(),
+            },
+            createAssistantMsg('summary'),
+            {
+              role: 'user',
+              content:
+                'design a comprehensive multi-region architecture migration plan',
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(turn2.model.id).toBe('gpt-4o-nano');
+      expect(mockState.pinnedTierByProfile.balanced).toBe('low');
+      expect(classifySpy).toHaveBeenCalledTimes(1);
+
+      // User unpins (/router pin auto) -> Turn 3 dynamically routes to high and does NOT re-auto-pin
+      delete mockState.pinnedTierByProfile.balanced;
+      classifySpy.mockResolvedValueOnce({
+        api: 'typesafe-system-one',
+        provider: 'typesafe',
+        model: 'jev-latest',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'high',
+            probabilities: { high: 0.95, medium: 0.03, low: 0.02 },
+            confidence: 0.95,
+          },
+        },
+      });
+
+      const turn3 = await vm.route(
+        buildRequest({
+          state: turn2.state,
+          messages: [
+            {
+              role: 'user',
+              content: 'summarize this file',
+              timestamp: Date.now(),
+            },
+            createAssistantMsg('summary'),
+            {
+              role: 'user',
+              content:
+                'design a comprehensive multi-region architecture migration plan',
+              timestamp: Date.now(),
+            },
+            createAssistantMsg('draft'),
+            {
+              role: 'user',
+              content: 'now analyze the deep architectural tradeoffs',
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(turn3.model.id).toBe('gpt-4o');
+      expect(mockState.pinnedTierByProfile.balanced).toBeUndefined();
+      expect(classifySpy).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('cost tracking helpers', () => {

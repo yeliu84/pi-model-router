@@ -1,6 +1,7 @@
 {
   "$schema": "./model-router.schema.json",
   "debug": false,
+  "autoPinFirstTurnDecision": false,
   "classifierModel": "auto",
   "phaseBias": 0.5,
   "maxSessionBudget": 1.0,

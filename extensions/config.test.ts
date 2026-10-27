@@ -149,6 +149,7 @@ describe('config.ts', () => {
     it('should merge profiles and models override', () => {
       const base: RouterConfig = {
         debug: false,
+        autoPinFirstTurnDecision: false,
         profiles: {
           balanced: {
             medium: { model: 'openai/gpt-4o-mini' },
@@ -161,6 +162,7 @@ describe('config.ts', () => {
 
       const override: Partial<RouterConfig> = {
         debug: true,
+        autoPinFirstTurnDecision: true,
         profiles: {
           balanced: {
             high: { model: 'openai/gpt-4o' },
@@ -176,6 +178,7 @@ describe('config.ts', () => {
 
       const merged = mergeConfig(base, override);
       expect(merged.debug).toBe(true);
+      expect(merged.autoPinFirstTurnDecision).toBe(true);
       expect(merged.profiles.balanced.medium?.model).toBe('openai/gpt-4o-mini');
       expect(merged.profiles.balanced.high?.model).toBe('openai/gpt-4o');
       expect(merged.profiles.cheap?.low?.model).toBe('openai/gpt-4o-mini');
@@ -272,6 +275,7 @@ describe('config.ts', () => {
     it('should normalize rules, profiles, phaseBias, budget, classifierModel', () => {
       const raw = {
         debug: true,
+        autoPinFirstTurnDecision: true,
         phaseBias: 0.8,
         maxSessionBudget: 5.5,
         classifierModel: 'gpt4',
@@ -292,6 +296,7 @@ describe('config.ts', () => {
       const { config, warnings } = normalizeConfig(raw);
       expect(warnings).toEqual([]);
       expect(config.debug).toBe(true);
+      expect(config.autoPinFirstTurnDecision).toBe(true);
       expect(config.phaseBias).toBe(0.8);
       expect(config.maxSessionBudget).toBe(5.5);
       expect(config.classifierModel?.model).toBe('openai/gpt-4o');

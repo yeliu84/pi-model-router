@@ -220,6 +220,7 @@ export interface RouterProfile {
 
 export interface RouterConfig {
   debug?: boolean;
+  autoPinFirstTurnDecision?: boolean;
   classifierModel?: ClassifierConfig;
   phaseBias?: number;
   maxSessionBudget?: number;

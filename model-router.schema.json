@@ -14,6 +14,11 @@
       "default": false,
       "description": "Enable turn-by-turn routing debug notifications and history."
     },
+    "autoPinFirstTurnDecision": {
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically pin the active router profile to the tier selected on the first turn of a conversation. Use '/router pin auto' to unpin and return to dynamic per-turn routing."
+    },
     "classifierModel": {
       "description": "Classifier model used to categorize user intent. Accepts \"auto\" (uses first available Pi native classifier such as Jev, Clef, GPT-6 Luna, or llama.cpp classifier), a model alias from \"models\", a canonical \"provider/model\" reference, or an object with \"model\" and optional \"thinking\".",
       "oneOf": [

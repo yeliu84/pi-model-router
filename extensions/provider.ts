@@ -93,13 +93,14 @@ const getTierModels = (
 ): string[] => {
   const tierConfig = profile[tier];
   if (!tierConfig) return preferredModel ? [preferredModel] : [];
-  return [
-    ...new Set([
-      ...(preferredModel ? [preferredModel] : []),
-      tierConfig.model,
-      ...(tierConfig.fallbacks ?? []),
-    ]),
+  const base = [
+    ...new Set([tierConfig.model, ...(tierConfig.fallbacks ?? [])]),
   ];
+  if (!preferredModel) return base;
+  const preferredIdx = base.indexOf(preferredModel);
+  if (preferredIdx === -1) return [preferredModel, ...base];
+  if (preferredIdx === 0) return base;
+  return [...base.slice(preferredIdx), ...base.slice(0, preferredIdx)];
 };
 
 const inferDecisionFromPrevious = (
@@ -420,9 +421,14 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
     const checkModelSupportsImage = (modelRef: string) =>
       findModelByRef(modelRef, registry)?.input?.includes('image') ?? false;
 
+    const preferredForImageCheck =
+      previousDecision?.tier === decision.tier
+        ? previousDecision.targetLabel
+        : decision.targetLabel;
+
     if (
       imageAttached &&
-      !getTierModels(profile, decision.tier, decision.targetLabel).some(
+      !getTierModels(profile, decision.tier, preferredForImageCheck).some(
         checkModelSupportsImage,
       )
     ) {
@@ -446,15 +452,29 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       }
     }
 
-    let modelsToTry = getTierModels(
-      profile,
-      decision.tier,
-      decision.targetLabel,
-    );
+    const isFirstTurnForProfile =
+      !isContinuation &&
+      request.reason !== 'retry' &&
+      !previousDecision &&
+      !pinnedTier;
+    if (state.currentConfig.autoPinFirstTurnDecision && isFirstTurnForProfile) {
+      state.pinnedTierByProfile[profileName] = decision.tier;
+      decision = {
+        ...decision,
+        reasoning: `${decision.reasoning} (Auto-pinned to ${decision.tier} tier from first turn.)`,
+      };
+    }
+
+    const preferredModel =
+      previousDecision?.tier === decision.tier
+        ? previousDecision.targetLabel
+        : decision.targetLabel;
+
+    let modelsToTry = getTierModels(profile, decision.tier, preferredModel);
     if (imageAttached) {
       modelsToTry = modelsToTry.filter(checkModelSupportsImage);
       if (modelsToTry.length === 0) {
-        modelsToTry = [decision.targetLabel];
+        modelsToTry = [preferredModel];
       }
     }
 
@@ -483,9 +503,11 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         reasoning:
           request.reason === 'retry' && request.failed
             ? `Fallback to ${resolved.modelRef} after ${request.failed.model.provider}/${request.failed.model.id} failed${request.failed.message.errorMessage ? ` (${request.failed.message.errorMessage})` : ''}. (Original: ${decision.reasoning})`
-            : resolved.modelRef !== originalTarget
-              ? `Fallback to ${resolved.modelRef} because ${originalTarget} was unavailable. (Original: ${decision.reasoning})`
-              : decision.reasoning,
+            : resolved.index > 0
+              ? `Fallback to ${resolved.modelRef} because ${modelsToTry[0]} was unavailable. (Original: ${decision.reasoning})`
+              : resolved.modelRef !== originalTarget
+                ? `Preserved fallback ${resolved.modelRef} for ${decision.tier} tier. (Original: ${decision.reasoning})`
+                : decision.reasoning,
       };
     }
 

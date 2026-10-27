@@ -130,6 +130,8 @@ export const mergeConfig = (
 
   return {
     debug: override.debug ?? base.debug,
+    autoPinFirstTurnDecision:
+      override.autoPinFirstTurnDecision ?? base.autoPinFirstTurnDecision,
     classifierModel: override.classifierModel ?? base.classifierModel,
     phaseBias: override.phaseBias ?? base.phaseBias,
     maxSessionBudget: override.maxSessionBudget ?? base.maxSessionBudget,
@@ -465,6 +467,10 @@ export const normalizeConfig = (
   return {
     config: {
       debug: typeof raw.debug === 'boolean' ? raw.debug : false,
+      autoPinFirstTurnDecision:
+        typeof raw.autoPinFirstTurnDecision === 'boolean'
+          ? raw.autoPinFirstTurnDecision
+          : false,
       classifierModel,
       phaseBias,
       maxSessionBudget,

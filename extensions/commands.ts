@@ -186,6 +186,7 @@ export const registerCommands = <
       `Router enabled: ${state.routerEnabled ? 'yes' : 'off'}`,
       `Selected profile: ${state.selectedProfile ?? 'none'}`,
       `Selected profile pin: ${state.selectedProfile ? (state.pinnedTierByProfile[state.selectedProfile] ?? 'auto') : 'none'}`,
+      `Auto-pin first turn: ${state.currentConfig.autoPinFirstTurnDecision ? 'on' : 'off'}`,
       `Pins by profile: ${formatPinSummary(state.pinnedTierByProfile)}`,
       `Thinking overrides: ${formatThinkingSummary(state.thinkingByProfile)}`,
       `Widget: ${state.widgetEnabled ? 'on' : 'off'}`,

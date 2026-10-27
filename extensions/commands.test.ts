@@ -367,6 +367,23 @@ describe('commands.ts', () => {
       );
     });
 
+    it('should display Auto-pin first turn status', async () => {
+      const pi = buildMockPi();
+      const state = buildDefaultState();
+      state.currentConfig.autoPinFirstTurnDecision = true;
+      const actions = buildMockActions();
+      const ctx = buildMockCtx();
+
+      registerCommands(pi, state, actions);
+      const cmd = pi.getRegisteredCommand();
+
+      await cmd.handler('status', ctx);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining('Auto-pin first turn: on'),
+        'info',
+      );
+    });
+
     it('should handle status without lastDecision', async () => {
       const pi = buildMockPi();
       const state = buildDefaultState();

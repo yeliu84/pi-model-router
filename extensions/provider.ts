@@ -38,42 +38,98 @@ import {
 } from './routing';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 
-const countedMessages = new WeakSet<object>();
+const countedObjects = new WeakSet<object>();
 
-export const markMessageCostCounted = (message: unknown): void => {
-  if (isObjectRecord(message)) {
-    countedMessages.add(message);
+const isBillableUsageRecord = (value: Record<string, unknown>): boolean =>
+  value.role === 'assistant' ||
+  value.role === 'toolResult' ||
+  value.type === 'compaction' ||
+  value.type === 'branch_summary' ||
+  value.type === 'usage';
+
+export const markMessageCostCounted = (input: unknown): void => {
+  if (!isObjectRecord(input)) return;
+  if (isBillableUsageRecord(input)) {
+    countedObjects.add(input);
+    return;
+  }
+  if (input.type === 'message' && isObjectRecord(input.message)) {
+    countedObjects.add(input);
+    countedObjects.add(input.message);
+    return;
+  }
+  if (isObjectRecord(input.message)) {
+    countedObjects.add(input.message);
+  }
+  if (Array.isArray(input.toolResults)) {
+    for (const toolResult of input.toolResults) {
+      if (isObjectRecord(toolResult)) {
+        countedObjects.add(toolResult);
+      }
+    }
+  }
+  if (isObjectRecord(input.compactionEntry)) {
+    countedObjects.add(input.compactionEntry);
+  }
+  if (isObjectRecord(input.summaryEntry)) {
+    countedObjects.add(input.summaryEntry);
   }
 };
 
-const extractSingleMessageCost = (message: unknown): number => {
-  if (
-    !isObjectRecord(message) ||
-    (message.role !== 'assistant' && message.role !== 'toolResult') ||
-    countedMessages.has(message)
-  ) {
+const extractSingleUsageCost = (item: unknown): number => {
+  if (!isObjectRecord(item)) return 0;
+  if (item.type === 'message') {
+    return extractSingleUsageCost(item.message);
+  }
+  if (!isBillableUsageRecord(item) || countedObjects.has(item)) {
     return 0;
   }
-  countedMessages.add(message);
+  countedObjects.add(item);
   const total =
-    isObjectRecord(message.usage) && isObjectRecord(message.usage.cost)
-      ? message.usage.cost.total
+    isObjectRecord(item.usage) && isObjectRecord(item.usage.cost)
+      ? item.usage.cost.total
       : undefined;
   return typeof total === 'number' && total > 0 ? total : 0;
 };
 
 export const extractUncountedMessageCost = (input: unknown): number => {
   if (!isObjectRecord(input)) return 0;
-  if (input.role === 'assistant' || input.role === 'toolResult') {
-    return extractSingleMessageCost(input);
+  if (isBillableUsageRecord(input) || input.type === 'message') {
+    return extractSingleUsageCost(input);
   }
-  let cost = extractSingleMessageCost(input.message);
+  let cost = extractSingleUsageCost(input.message);
   if (Array.isArray(input.toolResults)) {
     for (const toolResult of input.toolResults) {
-      cost += extractSingleMessageCost(toolResult);
+      cost += extractSingleUsageCost(toolResult);
     }
   }
+  cost += extractSingleUsageCost(input.compactionEntry);
+  cost += extractSingleUsageCost(input.summaryEntry);
   return cost;
+};
+
+const isSameVirtualRouterState = (
+  prev: VirtualRouterState | undefined,
+  next: VirtualRouterState,
+): boolean => {
+  if (!prev) return false;
+  if (prev.phase !== next.phase || prev.tier !== next.tier) return false;
+  const a = prev.lastDecision;
+  const b = next.lastDecision;
+  return (
+    a.profile === b.profile &&
+    a.tier === b.tier &&
+    a.phase === b.phase &&
+    a.targetProvider === b.targetProvider &&
+    a.targetModelId === b.targetModelId &&
+    a.targetLabel === b.targetLabel &&
+    a.reasoning === b.reasoning &&
+    a.thinking === b.thinking &&
+    Boolean(a.isClassifier) === Boolean(b.isClassifier) &&
+    Boolean(a.isFallback) === Boolean(b.isFallback) &&
+    Boolean(a.isBudgetForced) === Boolean(b.isBudgetForced) &&
+    Boolean(a.isRuleMatched) === Boolean(b.isRuleMatched)
+  );
 };
 
 const supportsReasoning = (
@@ -535,14 +591,18 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       // Stale extension context — skip non-critical UI updates.
     }
 
+    const nextState: VirtualRouterState = {
+      phase: decision.phase,
+      tier: decision.tier,
+      lastDecision: decision,
+    };
+
     return {
       model: selectedModel,
       thinkingLevel: delegatedThinking,
-      state: {
-        phase: decision.phase,
-        tier: decision.tier,
-        lastDecision: decision,
-      },
+      state: isSameVirtualRouterState(request.state, nextState)
+        ? request.state
+        : nextState,
     };
   } finally {
     try {

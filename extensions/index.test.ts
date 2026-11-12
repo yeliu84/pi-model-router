@@ -85,6 +85,14 @@ type FullRouterEvent = RouterModelSelectEvent &
       role?: string;
       usage?: { cost?: { total?: number } };
     };
+    compactionEntry?: {
+      type: string;
+      usage?: { cost?: { total?: number } };
+    };
+    summaryEntry?: {
+      type: string;
+      usage?: { cost?: { total?: number } };
+    };
   };
 
 type RegisteredHandler = (
@@ -761,6 +769,187 @@ describe('index.ts (orchestrator)', () => {
         'router-state',
         expect.objectContaining({
           accumulatedCost: 0.0042,
+        }),
+      );
+    });
+
+    it('should accumulate compaction, branch_summary, and trailing usage costs when router is enabled', async () => {
+      routerExtension(mockPi);
+      const mockCtx = buildMockCtx();
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      mockPi.appendEntry.mockClear();
+
+      // 1. Live compaction event adds compactionEntry cost
+      const compactHandlers = eventListeners['session_compact'] || [];
+      const compactionEntry = {
+        type: 'compaction',
+        usage: { cost: { total: 0.003 } },
+      };
+      for (const handler of compactHandlers) {
+        await handler({ compactionEntry }, mockCtx);
+      }
+
+      expect(mockPi.appendEntry).toHaveBeenLastCalledWith(
+        'router-state',
+        expect.objectContaining({
+          accumulatedCost: 0.003,
+        }),
+      );
+
+      // 2. Tree navigation with a new branch_summary appended after the latest router-state
+      const preSnapshotMessage = {
+        type: 'message',
+        message: { role: 'assistant', usage: { cost: { total: 0.099 } } },
+      };
+      const branchSummaryEntry = {
+        type: 'branch_summary',
+        usage: { cost: { total: 0.002 } },
+      };
+      mockCtx.sessionManager.getBranch = () => [
+        preSnapshotMessage,
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            pinByProfile: {},
+            thinkingByProfile: {},
+            accumulatedCost: 0.01,
+            timestamp: Date.now(),
+          },
+        },
+        branchSummaryEntry,
+      ];
+
+      mockPi.appendEntry.mockClear();
+      const treeHandlers = eventListeners['session_tree'] || [];
+      for (const handler of treeHandlers) {
+        await handler({ summaryEntry: branchSummaryEntry }, mockCtx);
+      }
+
+      // Should equal saved 0.01 + post-snapshot 0.002 (NOT pre-snapshot 0.099)
+      expect(mockPi.appendEntry).toHaveBeenLastCalledWith(
+        'router-state',
+        expect.objectContaining({
+          accumulatedCost: 0.012,
+        }),
+      );
+
+      // 3. Trailing out-of-turn usage entry (e.g. cache_warm) picked up on turn_start
+      const cacheWarmUsage = {
+        type: 'usage',
+        usage: { cost: { total: 0.001 } },
+      };
+      mockCtx.sessionManager.getBranch = () => [
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            accumulatedCost: 0.012,
+            timestamp: Date.now(),
+          },
+        },
+        cacheWarmUsage,
+      ];
+
+      const turnStartHandlers = eventListeners['turn_start'] || [];
+      for (const handler of turnStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      mockPi.appendEntry.mockClear();
+      const turnEndHandlers = eventListeners['turn_end'] || [];
+      for (const handler of turnEndHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      expect(mockPi.appendEntry).toHaveBeenLastCalledWith(
+        'router-state',
+        expect.objectContaining({
+          accumulatedCost: expect.closeTo(0.013, 6),
+        }),
+      );
+    });
+
+    it('should not leak non-router turn_end message costs after switching back to router', async () => {
+      routerExtension(mockPi);
+      const mockCtx = buildMockCtx();
+      mockCtx.model = { provider: 'openai', id: 'gpt-4o' };
+
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      const nonRouterReply = {
+        role: 'assistant' as const,
+        content: [{ type: 'text' as const, text: 'hello' }],
+        api: 'openai-completions',
+        provider: 'openai',
+        model: 'gpt-4o',
+        usage: {
+          input: 100,
+          output: 20,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 120,
+          cost: {
+            input: 0.05,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.05,
+          },
+        },
+        stopReason: 'stop' as const,
+        timestamp: Date.now(),
+      };
+
+      const turnEndHandlers = eventListeners['turn_end'] || [];
+      for (const handler of turnEndHandlers) {
+        await handler({ message: nonRouterReply }, mockCtx);
+      }
+
+      // Now switch to router/balanced and route a user request carrying nonRouterReply in messages
+      mockCtx.model = { provider: 'router', id: 'balanced' };
+      const modelSelectHandlers = eventListeners['model_select'] || [];
+      for (const handler of modelSelectHandlers) {
+        await handler(
+          { model: { provider: 'router', id: 'balanced' } },
+          mockCtx,
+        );
+      }
+
+      const vmDef = mockPi.registerVirtualModel.mock.lastCall?.[0];
+      expect(vmDef).toBeDefined();
+
+      mockPi.appendEntry.mockClear();
+      await vmDef!.route(
+        {
+          model: { id: 'balanced', provider: 'router' } as Model<Api>,
+          thinkingLevel: 'medium',
+          reason: 'user',
+          messages: [
+            { role: 'user', content: 'hi', timestamp: 0 },
+            nonRouterReply,
+            { role: 'user', content: 'next', timestamp: 1 },
+          ],
+        },
+        mockCtx,
+      );
+
+      expect(mockPi.appendEntry).toHaveBeenLastCalledWith(
+        'router-state',
+        expect.objectContaining({
+          accumulatedCost: 0,
         }),
       );
     });

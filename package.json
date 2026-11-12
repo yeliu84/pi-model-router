@@ -3,6 +3,7 @@
   "version": "0.5.4",
   "type": "module",
   "files": [
+    "CHANGELOG.md",
     "extensions",
     "!extensions/*.test.ts",
     "LICENSE",
@@ -52,8 +53,8 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "oxfmt": "^0.73.0",
+    "oxfmt": "^0.78.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.4"
+    "vitest": "^5.1.0"
   }
 }

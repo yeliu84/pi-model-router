@@ -841,6 +841,45 @@ describe('provider.ts (virtual models)', () => {
       expect(mockState.pinnedTierByProfile.balanced).toBeUndefined();
       expect(classifySpy).toHaveBeenCalledTimes(2);
     });
+
+    it('should preserve request.state reference when VirtualRouterState does not change across continuations', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      // Initial user turn -> produces initial state
+      const turn1 = await vm.route(
+        buildRequest({
+          reason: 'user',
+          messages: [
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(turn1.state).toBeDefined();
+
+      // First tool-result continuation -> updates reasoning to "Preserved ...", so state object changes once
+      const cont1 = await vm.route(
+        buildRequest({
+          reason: 'continuation',
+          state: turn1.state,
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(cont1.state).toBeDefined();
+      expect(cont1.state).not.toBe(turn1.state);
+
+      // Subsequent tool-result continuations -> identical routing state, returns exact same state reference
+      // so Pi does not append redundant pi.virtual-model-state session entries
+      const cont2 = await vm.route(
+        buildRequest({
+          reason: 'continuation',
+          state: cont1.state,
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(cont2.state).toBe(cont1.state);
+    });
   });
 
   describe('cost tracking helpers', () => {
@@ -885,6 +924,52 @@ describe('provider.ts (virtual models)', () => {
       // Subsequent check should not double-count either message or toolResult
       expect(extractUncountedMessageCost(turnEndMsg)).toBe(0);
       expect(extractUncountedMessageCost(toolResultWithUsage)).toBe(0);
+    });
+
+    it('should count compaction, branch_summary, and usage session entries once without double-counting', () => {
+      const compactionEntry = {
+        type: 'compaction',
+        summary: 'Compacted history',
+        usage: { cost: { total: 0.0035 } },
+      };
+      expect(
+        extractUncountedMessageCost({
+          type: 'session_compact',
+          compactionEntry,
+        }),
+      ).toBeCloseTo(0.0035);
+      expect(extractUncountedMessageCost(compactionEntry)).toBe(0);
+
+      const summaryEntry = {
+        type: 'branch_summary',
+        summary: 'Summarized abandoned branch',
+        usage: { cost: { total: 0.0025 } },
+      };
+      expect(
+        extractUncountedMessageCost({
+          type: 'session_tree',
+          summaryEntry,
+        }),
+      ).toBeCloseTo(0.0025);
+      expect(extractUncountedMessageCost(summaryEntry)).toBe(0);
+
+      const usageEntry = {
+        type: 'usage',
+        kind: 'cache_warm',
+        usage: { cost: { total: 0.0012 } },
+      };
+      expect(extractUncountedMessageCost(usageEntry)).toBeCloseTo(0.0012);
+      expect(extractUncountedMessageCost(usageEntry)).toBe(0);
+
+      const preCountedMessageEntry = {
+        type: 'message',
+        message: createAssistantMsg('already-saved', 0.02),
+      };
+      markMessageCostCounted(preCountedMessageEntry);
+      expect(extractUncountedMessageCost(preCountedMessageEntry)).toBe(0);
+      expect(extractUncountedMessageCost(preCountedMessageEntry.message)).toBe(
+        0,
+      );
     });
   });
 });

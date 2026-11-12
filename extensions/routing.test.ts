@@ -933,5 +933,82 @@ describe('routing.ts', () => {
       expect(extractLastUserImages(ctxWithImg)).toHaveLength(1);
       expect(extractLastUserImages(context)).toEqual([]);
     });
+
+    it('should classify with GitHub Copilot microsoft-decision-1 and omit images for text-only classifiers', async () => {
+      const copilotClassifier: ClassifierModel<'typesafe-system-one'> = {
+        type: 'classifier',
+        id: 'microsoft-decision-1',
+        name: 'Microsoft Decision 1',
+        api: 'typesafe-system-one',
+        provider: 'github-copilot',
+        baseUrl: 'https://api.individual.githubcopilot.com',
+        input: ['text'],
+        contextWindow: 32768,
+        cost: { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const classifyFn = vi.fn().mockResolvedValue({
+        api: 'typesafe-system-one',
+        provider: 'github-copilot',
+        model: 'microsoft-decision-1',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {
+          input: 250,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 251,
+          cost: {
+            input: 0.0000105,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.0000105,
+          },
+        },
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'medium',
+            probabilities: { high: 0.12, medium: 0.78, low: 0.1 },
+            confidence: 0.68,
+          },
+        },
+      } satisfies ClassifierResult);
+
+      const imageCtx: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Update the button padding in header.tsx' },
+              { type: 'image', data: 'pngdata', mimeType: 'image/png' },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      };
+
+      const result = await runClassifier(
+        'github-copilot/microsoft-decision-1',
+        {
+          ...mockRegistry,
+          findOfType: vi.fn().mockReturnValue(copilotClassifier),
+          classify: classifyFn,
+        },
+        imageCtx,
+      );
+
+      expect(result).toEqual({
+        tier: 'medium',
+        reasoning:
+          'github-copilot/microsoft-decision-1 selected medium (p=78%, conf=68%).',
+        cost: 0.0000105,
+      });
+      // Text-only classifier must not receive images in ClassifierContext
+      expect(classifyFn).toHaveBeenCalledTimes(1);
+      expect(classifyFn.mock.calls[0][1]).not.toHaveProperty('images');
+    });
   });
 });

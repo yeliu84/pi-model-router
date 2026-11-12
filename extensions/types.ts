@@ -164,7 +164,12 @@ export interface RouterExtensionAPI<
   setThinkingLevel: ExtensionAPI['setThinkingLevel'];
   appendEntry: ExtensionAPI['appendEntry'];
   on(
-    event: 'session_start' | 'session_tree' | 'turn_start' | 'turn_end',
+    event:
+      | 'session_start'
+      | 'session_tree'
+      | 'session_compact'
+      | 'turn_start'
+      | 'turn_end',
     handler: (event: unknown, ctx: TCtx) => Promise<void> | void,
   ): void;
   on(
@@ -276,4 +281,5 @@ export interface CustomSessionEntry {
   customType?: string;
   data?: unknown;
   message?: unknown;
+  usage?: unknown;
 }

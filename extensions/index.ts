@@ -278,18 +278,16 @@ const routerExtension = <
 
     const entries: readonly CustomSessionEntry[] =
       ctx.sessionManager.getBranch();
-    for (const entry of entries) {
-      if (entry.type === 'message' && entry.message !== undefined) {
-        markMessageCostCounted(entry.message);
-      }
-    }
-    const savedState = entries
-      .filter(
-        (entry) =>
-          entry.type === 'custom' && entry.customType === 'router-state',
-      )
-      .map((entry) => entry.data)
-      .findLast((data) => isRouterPersistedState(data));
+    const lastRouterStateIndex = entries.findLastIndex(
+      (entry) =>
+        entry.type === 'custom' &&
+        entry.customType === 'router-state' &&
+        isRouterPersistedState(entry.data),
+    );
+    const savedState =
+      lastRouterStateIndex >= 0
+        ? entries[lastRouterStateIndex].data
+        : undefined;
 
     if (isRouterPersistedState(savedState)) {
       state.selectedProfile = resolveProfileName(
@@ -315,6 +313,21 @@ const routerExtension = <
         savedState.lastNonRouterModel ?? state.lastNonRouterModel;
       state.accumulatedCost = savedState.accumulatedCost ?? 0;
       state.lastDecision = savedState.lastDecision;
+
+      for (let i = 0; i <= lastRouterStateIndex; i++) {
+        markMessageCostCounted(entries[i]);
+      }
+      for (let i = lastRouterStateIndex + 1; i < entries.length; i++) {
+        if (state.routerEnabled) {
+          state.accumulatedCost += extractUncountedMessageCost(entries[i]);
+        } else {
+          markMessageCostCounted(entries[i]);
+        }
+      }
+    } else {
+      for (const entry of entries) {
+        markMessageCostCounted(entry);
+      }
     }
 
     await actions.ensureValidActiveRouterProfile(ctx);
@@ -383,8 +396,40 @@ const routerExtension = <
     }
   };
 
+  const syncTrailingBranchUsage = (ctx: TCtx) => {
+    const entries = ctx.sessionManager?.getBranch?.();
+    if (!entries || entries.length === 0) return;
+    let addedCost = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.type === 'custom' && entry.customType === 'router-state') {
+        break;
+      }
+      if (state.routerEnabled) {
+        addedCost += extractUncountedMessageCost(entry);
+      } else {
+        markMessageCostCounted(entry);
+      }
+    }
+    if (addedCost > 0) {
+      state.accumulatedCost += addedCost;
+    }
+  };
+
+  pi.on('session_compact', async (event, ctx) => {
+    ensureInitializedFromContext(ctx);
+    if (state.routerEnabled) {
+      state.accumulatedCost += extractUncountedMessageCost(event);
+    } else {
+      markMessageCostCounted(event);
+    }
+    persistState();
+    actions.updateStatus(ctx);
+  });
+
   pi.on('turn_start', async (_event, ctx) => {
     ensureInitializedFromContext(ctx);
+    syncTrailingBranchUsage(ctx);
     actions.registerRouterProvider();
   });
 
@@ -415,6 +460,8 @@ const routerExtension = <
     ensureInitializedFromContext(ctx);
     if (state.routerEnabled) {
       state.accumulatedCost += extractUncountedMessageCost(event);
+    } else {
+      markMessageCostCounted(event);
     }
     persistState();
     actions.updateStatus(ctx);

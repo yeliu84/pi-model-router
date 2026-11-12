@@ -2,7 +2,7 @@
 
 All notable changes to `@yeliu84/pi-model-router` are documented in this file.
 
-## [Unreleased]
+## [0.5.5] - 2026-11-11
 
 ### Added
 

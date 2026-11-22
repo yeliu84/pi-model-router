@@ -21,7 +21,6 @@ import {
   isThinkingLevel,
   findModelByRef,
   applyThinkingOverride,
-  getUnsupportedTiers,
 } from './config';
 import {
   formatPinSummary,
@@ -29,7 +28,7 @@ import {
   formatModelRef,
   formatSessionCost,
   formatDecision,
-  formatUnsupportedThinkingWarning,
+  notifyUnsupportedThinking,
 } from './ui';
 
 export const registerCommands = <
@@ -352,19 +351,12 @@ export const registerCommands = <
     actions.persistState();
     actions.updateStatus(ctx);
     actions.syncPiThinkingLevel(nextLevel ?? state.lastDecision?.thinking);
-    if (nextLevel) {
-      const unsupported = getUnsupportedTiers(
-        state.currentConfig.profiles[currentProfile],
-        nextLevel,
-        ctx.modelRegistry,
-      );
-      if (unsupported.length > 0) {
-        ctx.ui.notify(
-          formatUnsupportedThinkingWarning(tier, nextLevel, unsupported),
-          'warning',
-        );
-      }
-    }
+    notifyUnsupportedThinking(
+      ctx,
+      state.currentConfig.profiles[currentProfile],
+      tier,
+      nextLevel,
+    );
   };
 
   const handleDisable = async (args: string[], ctx: TCtx) => {

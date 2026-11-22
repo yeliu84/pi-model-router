@@ -56,9 +56,9 @@ Copy the example config to one of:
   "maxSessionBudget": 1.0,
   "profiles": {
     "auto": {
-      "high": { "model": "openai/gpt-5.4-pro", "thinking": "high" },
-      "medium": { "model": "google/gemini-flash-latest", "thinking": "medium" },
-      "low": { "model": "openai/gpt-5.4-nano", "thinking": "low" }
+      "high": { "model": "openai/gpt-6.2-astra", "thinking": "high" },
+      "medium": { "model": "openai/gpt-6.2-sol", "thinking": "medium" },
+      "low": { "model": "openai/gpt-6-luna", "thinking": "low" }
     }
   }
 }
@@ -81,13 +81,13 @@ Copy the example config to one of:
 
 #### 1. Using Pi's built-in `/llama` integration
 
-If you connect a running `llama-server` instance in Pi via `/llama`, Pi registers its models under the `llama.cpp` provider. Reference them in `model-router.json` as `"llama.cpp/<model-id>"` (model IDs containing slashes, such as HuggingFace repo names, are supported):
+If you connect a running `llama-server` instance in Pi via `/llama` (defaulting to `http://127.0.0.1:9931` in Pi `1.6.0`), Pi registers its models under the `llama.cpp` provider. Reference them in `model-router.json` as `"llama.cpp/<model-id>"` (model IDs containing slashes, such as HuggingFace repo names, are supported):
 
 ```json
 {
   "profiles": {
     "local": {
-      "high": { "model": "anthropic/claude-opus-4-6" },
+      "high": { "model": "anthropic/claude-opus-5-5" },
       "medium": { "model": "llama.cpp/Qwen3.5-27B-Q4_K_M.gguf" },
       "low": { "model": "llama.cpp/Qwen/Qwen3-Coder-Next-GGUF" }
     }
@@ -141,4 +141,4 @@ Then reference `"llama-local/qwen3-coder"` in your `model-router.json` tiers or 
 ## Documentation
 
 - [Architecture Guide](docs/ARCHITECTURE.md): Deep dive into the routing logic and modular design.
-- [Sample Configuration](model-router.example.json): Diverse profile examples (`cheap`, `deep`, `balanced`).
+- [Sample Configuration](model-router.example.json): Diverse profile examples (`auto`, `cheap`, `deep`, `anthropic`).

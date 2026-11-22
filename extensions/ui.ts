@@ -6,7 +6,9 @@ import type {
   RouterThinkingByProfile,
   RouterTier,
   RouterUIContext,
+  RouterModelCapabilityLookup,
 } from './types';
+import { getUnsupportedTiers } from './config';
 
 const getEffectiveThinking = (
   thinkingByProfile: RouterThinkingByProfile,
@@ -67,6 +69,27 @@ export const formatUnsupportedThinkingWarning = (
 ): string =>
   `Router thinking (${scope}) set to ${level}. ` +
   `${unsupported.join(', ')} tier${unsupported.length > 1 ? 's' : ''} may not support '${level}'.`;
+
+export const notifyUnsupportedThinking = (
+  ctx: {
+    ui: {
+      notify: (message: string, type?: 'info' | 'warning' | 'error') => void;
+    };
+    modelRegistry?: RouterModelCapabilityLookup;
+  },
+  profile: RouterConfig['profiles'][string] | undefined,
+  scope: RouterTier | 'all',
+  level: ThinkingLevel | undefined,
+): void => {
+  if (!profile || !level) return;
+  const unsupported = getUnsupportedTiers(profile, level, ctx.modelRegistry);
+  if (unsupported.length > 0) {
+    ctx.ui.notify(
+      formatUnsupportedThinkingWarning(scope, level, unsupported),
+      'warning',
+    );
+  }
+};
 
 export const updateStatus = (
   ctx: RouterUIContext,

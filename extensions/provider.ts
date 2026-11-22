@@ -26,6 +26,7 @@ import {
   resolveMaxTokens,
   resolveThinkingLevels,
   collectProfileThinkingLevels,
+  getUnsupportedTiers,
   clampThinkingLevel,
 } from './config';
 import {
@@ -36,9 +37,14 @@ import {
   runClassifier,
   hasImageAttachment,
 } from './routing';
+import { isSameVirtualRouterState } from './state';
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
 
-const countedObjects = new WeakSet<object>();
+let countedObjects = new WeakSet<object>();
+
+export const resetCountedMessageCosts = (): void => {
+  countedObjects = new WeakSet<object>();
+};
 
 const isBillableUsageRecord = (value: Record<string, unknown>): boolean =>
   value.role === 'assistant' ||
@@ -46,35 +52,6 @@ const isBillableUsageRecord = (value: Record<string, unknown>): boolean =>
   value.type === 'compaction' ||
   value.type === 'branch_summary' ||
   value.type === 'usage';
-
-export const markMessageCostCounted = (input: unknown): void => {
-  if (!isObjectRecord(input)) return;
-  if (isBillableUsageRecord(input)) {
-    countedObjects.add(input);
-    return;
-  }
-  if (input.type === 'message' && isObjectRecord(input.message)) {
-    countedObjects.add(input);
-    countedObjects.add(input.message);
-    return;
-  }
-  if (isObjectRecord(input.message)) {
-    countedObjects.add(input.message);
-  }
-  if (Array.isArray(input.toolResults)) {
-    for (const toolResult of input.toolResults) {
-      if (isObjectRecord(toolResult)) {
-        countedObjects.add(toolResult);
-      }
-    }
-  }
-  if (isObjectRecord(input.compactionEntry)) {
-    countedObjects.add(input.compactionEntry);
-  }
-  if (isObjectRecord(input.summaryEntry)) {
-    countedObjects.add(input.summaryEntry);
-  }
-};
 
 const extractSingleUsageCost = (item: unknown): number => {
   if (!isObjectRecord(item)) return 0;
@@ -97,39 +74,21 @@ export const extractUncountedMessageCost = (input: unknown): number => {
   if (isBillableUsageRecord(input) || input.type === 'message') {
     return extractSingleUsageCost(input);
   }
-  let cost = extractSingleUsageCost(input.message);
-  if (Array.isArray(input.toolResults)) {
-    for (const toolResult of input.toolResults) {
-      cost += extractSingleUsageCost(toolResult);
-    }
+  const items = [
+    input.message,
+    ...(Array.isArray(input.toolResults) ? input.toolResults : []),
+    input.compactionEntry,
+    input.summaryEntry,
+  ];
+  let cost = 0;
+  for (const item of items) {
+    cost += extractSingleUsageCost(item);
   }
-  cost += extractSingleUsageCost(input.compactionEntry);
-  cost += extractSingleUsageCost(input.summaryEntry);
   return cost;
 };
 
-const isSameVirtualRouterState = (
-  prev: VirtualRouterState | undefined,
-  next: VirtualRouterState,
-): boolean => {
-  if (!prev) return false;
-  if (prev.phase !== next.phase || prev.tier !== next.tier) return false;
-  const a = prev.lastDecision;
-  const b = next.lastDecision;
-  return (
-    a.profile === b.profile &&
-    a.tier === b.tier &&
-    a.phase === b.phase &&
-    a.targetProvider === b.targetProvider &&
-    a.targetModelId === b.targetModelId &&
-    a.targetLabel === b.targetLabel &&
-    a.reasoning === b.reasoning &&
-    a.thinking === b.thinking &&
-    Boolean(a.isClassifier) === Boolean(b.isClassifier) &&
-    Boolean(a.isFallback) === Boolean(b.isFallback) &&
-    Boolean(a.isBudgetForced) === Boolean(b.isBudgetForced) &&
-    Boolean(a.isRuleMatched) === Boolean(b.isRuleMatched)
-  );
+export const markMessageCostCounted = (input: unknown): void => {
+  extractUncountedMessageCost(input);
 };
 
 const supportsReasoning = (
@@ -141,6 +100,27 @@ const supportsReasoning = (
       ? findModelByRef(profile[tier]?.model, modelRegistry)?.reasoning
       : profile[tier] && profile[tier].reasoning !== false,
   );
+
+const resolveVirtualThinkingLevels = (
+  profile: RouterConfig['profiles'][string],
+  modelRegistry: RouterModelCapabilityLookup | undefined,
+): ThinkingLevel[] => {
+  if (!supportsReasoning(profile, modelRegistry)) return ['off'];
+  const profileLevels = collectProfileThinkingLevels(profile, modelRegistry);
+  const configuredTierCount = ROUTER_TIERS.filter((tier) =>
+    Boolean(profile[tier]),
+  ).length;
+  const anyTierSupportsOff =
+    getUnsupportedTiers(profile, 'off', modelRegistry).length <
+    configuredTierCount;
+  const levels = THINKING_LEVELS.filter(
+    (level) =>
+      (level === 'off' && anyTierSupportsOff) ||
+      profileLevels.has(level) ||
+      (profileLevels.size === 0 && DEFAULT_THINKING_LEVELS.includes(level)),
+  );
+  return levels.length > 0 ? levels : ['off'];
+};
 
 const getTierModels = (
   profile: RouterConfig['profiles'][string],
@@ -645,20 +625,10 @@ export const registerRouterProvider = <TContext = ExtensionContext>(
       if (mot > maxMaxTokens) maxMaxTokens = mot;
     }
 
-    const hasReasoning = supportsReasoning(profile, state.currentModelRegistry);
-    const profileLevels = collectProfileThinkingLevels(
+    const thinkingLevels = resolveVirtualThinkingLevels(
       profile,
       state.currentModelRegistry,
     );
-    const thinkingLevels: ThinkingLevel[] = hasReasoning
-      ? THINKING_LEVELS.filter(
-          (level) =>
-            level === 'off' ||
-            profileLevels.has(level) ||
-            (profileLevels.size === 0 &&
-              DEFAULT_THINKING_LEVELS.includes(level)),
-        )
-      : ['off'];
 
     return {
       id: name,

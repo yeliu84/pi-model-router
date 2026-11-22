@@ -635,11 +635,7 @@ export const getUnsupportedTiers = (
       const registryModel = findTierModel(tierConfig, modelRegistry);
       return (
         registryModel?.reasoning !== false &&
-        registryModel?.thinkingLevelMap !== undefined &&
-        !getSupportedThinkingLevels({
-          reasoning: true,
-          ...registryModel,
-        } as Model<Api>).includes('off')
+        registryModel?.thinkingLevelMap?.off === null
       );
     }
     return !resolveThinkingLevels(tier, profile, modelRegistry)?.includes(

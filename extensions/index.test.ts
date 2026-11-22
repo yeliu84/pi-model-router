@@ -953,5 +953,86 @@ describe('index.ts (orchestrator)', () => {
         }),
       );
     });
+
+    it('should accurately re-tally post-snapshot turn costs and persist initial state after in-session /tree navigation', async () => {
+      routerExtension(mockPi);
+      const mockCtx = buildMockCtx();
+
+      // Start at an empty session -> persists initial empty snapshot
+      const sessionStartHandlers = eventListeners['session_start'] || [];
+      for (const handler of sessionStartHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // Live turn completes -> turn_end marks liveReply counted in WeakSet
+      const liveReply = {
+        role: 'assistant' as const,
+        usage: { cost: { total: 0.05 } },
+      };
+      const turnEndHandlers = eventListeners['turn_end'] || [];
+      for (const handler of turnEndHandlers) {
+        await handler({ message: liveReply }, mockCtx);
+      }
+
+      // 1. User navigates via /tree directly to the assistant entry (before the child router-state entry)
+      const assistantEntry = {
+        type: 'message',
+        message: liveReply,
+      };
+      mockCtx.sessionManager.getBranch = () => [
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            accumulatedCost: 0.01,
+            timestamp: Date.now(),
+          },
+        },
+        {
+          type: 'message',
+          message: { role: 'user', content: 'hi', timestamp: 0 },
+        },
+        assistantEntry,
+      ];
+
+      mockPi.appendEntry.mockClear();
+      const treeHandlers = eventListeners['session_tree'] || [];
+      for (const handler of treeHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      // Resetting countedObjects allows liveReply ($0.05) on the restored branch to add onto $0.01 -> $0.06
+      expect(mockPi.appendEntry).toHaveBeenLastCalledWith(
+        'router-state',
+        expect.objectContaining({
+          accumulatedCost: expect.closeTo(0.06, 6),
+        }),
+      );
+
+      // Subsequent turn_end referencing the already-counted liveReply must not double-count it
+      mockPi.appendEntry.mockClear();
+      for (const handler of turnEndHandlers) {
+        await handler({ message: liveReply }, mockCtx);
+      }
+      expect(mockPi.appendEntry).not.toHaveBeenCalled();
+
+      // 2. Navigating back to an empty root must clear lastPersistedSnapshot so the fresh branch persists state
+      mockCtx.sessionManager.getBranch = () => [];
+      mockPi.appendEntry.mockClear();
+      for (const handler of treeHandlers) {
+        await handler({}, mockCtx);
+      }
+
+      expect(mockPi.appendEntry).toHaveBeenCalledWith(
+        'router-state',
+        expect.objectContaining({
+          enabled: true,
+          selectedProfile: 'balanced',
+          accumulatedCost: 0,
+        }),
+      );
+    });
   });
 });

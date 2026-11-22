@@ -213,6 +213,92 @@ describe('provider.ts (virtual models)', () => {
       expect(registeredVirtualModels.has('router/cheap')).toBe(false);
     });
 
+    it('should omit "off" from virtual model thinkingLevels when all tiers disallow it (e.g. gpt-6.2-astra / gpt-6.2-sol) and clamp up on route', async () => {
+      const noOffThinkingMap: Model<Api>['thinkingLevelMap'] = {
+        off: null,
+        minimal: null,
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        xhigh: 'xhigh',
+      };
+      mockState.currentConfig = {
+        profiles: {
+          balanced: {
+            high: {
+              model: 'openai/gpt-6.2-astra',
+              thinking: 'high',
+            },
+            medium: {
+              model: 'openai/gpt-6.2-sol',
+              thinking: 'off',
+            },
+          },
+        },
+      };
+      mockState.currentModelRegistry = {
+        find: (provider: string, modelId: string) =>
+          createTestModel({
+            provider,
+            id: modelId,
+            reasoning: true,
+            thinkingLevelMap: noOffThinkingMap,
+          }),
+        hasConfiguredAuth: () => true,
+      };
+      mockState.lastExtensionContext = {
+        modelRegistry: mockState.currentModelRegistry,
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced');
+      expect(vm).toBeDefined();
+      expect(vm!.thinkingLevels).toEqual(['low', 'medium', 'high', 'xhigh']);
+
+      // Routing to a medium tier configured with 'off' (or overridden to 'off') clamps up to 'low'
+      const route = await vm!.route(
+        buildRequest({
+          messages: [
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext,
+      );
+      expect(route.model.id).toBe('gpt-6.2-sol');
+      expect(route.thinkingLevel).toBe('low');
+
+      // When at least one tier allows 'off', the virtual model keeps 'off' selectable
+      mockState.lastRegisteredModels = '';
+      mockState.currentConfig.profiles.balanced.low = {
+        model: 'openai/gpt-6-luna',
+        thinking: 'off',
+      };
+      mockState.currentModelRegistry = {
+        find: (provider: string, modelId: string) =>
+          createTestModel({
+            provider,
+            id: modelId,
+            reasoning: true,
+            thinkingLevelMap:
+              modelId === 'gpt-6-luna'
+                ? {
+                    off: 'none',
+                    minimal: null,
+                    low: 'low',
+                    medium: 'medium',
+                    high: 'high',
+                  }
+                : noOffThinkingMap,
+          }),
+        hasConfiguredAuth: () => true,
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      expect(
+        registeredVirtualModels.get('router/balanced')!.thinkingLevels,
+      ).toEqual(['off', 'low', 'medium', 'high', 'xhigh']);
+    });
+
     it('should route user requests and return physical model, clamped thinkingLevel, and branch state', async () => {
       registerRouterProvider(mockPi, mockState, mockActions);
       const vm = registeredVirtualModels.get('router/balanced')!;

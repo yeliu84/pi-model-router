@@ -16,20 +16,20 @@ import {
   profileNames,
   resolveProfileName,
   applyThinkingOverride,
-  getUnsupportedTiers,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
-import { isRouterPersistedState, buildPersistedState } from './state';
 import {
-  updateStatus,
-  formatDecision,
-  formatUnsupportedThinkingWarning,
-} from './ui';
+  isRouterPersistedState,
+  buildPersistedState,
+  serializePersistedStateSnapshot,
+} from './state';
+import { updateStatus, formatDecision, notifyUnsupportedThinking } from './ui';
 import { registerCommands } from './commands';
 import {
   registerRouterProvider,
   markMessageCostCounted,
   extractUncountedMessageCost,
+  resetCountedMessageCosts,
 } from './provider';
 
 const routerExtension = <
@@ -112,6 +112,13 @@ const routerExtension = <
     return state.thinkingByProfile[profileName]?.[tier];
   };
 
+  const recordUsageCost = (input: unknown) => {
+    const cost = extractUncountedMessageCost(input);
+    if (state.routerEnabled) {
+      state.accumulatedCost += cost;
+    }
+  };
+
   const persistState = () => {
     const persisted = buildPersistedState(
       state.routerEnabled,
@@ -125,17 +132,7 @@ const routerExtension = <
       state.lastNonRouterModel,
       state.accumulatedCost,
     );
-    const snapshot = JSON.stringify({
-      ...persisted,
-      timestamp: 0,
-      lastDecision: persisted.lastDecision
-        ? { ...persisted.lastDecision, timestamp: 0 }
-        : undefined,
-      debugHistory: persisted.debugHistory?.map((decision) => ({
-        ...decision,
-        timestamp: 0,
-      })),
-    });
+    const snapshot = serializePersistedStateSnapshot(persisted);
     if (snapshot === lastPersistedSnapshot) {
       return;
     }
@@ -270,6 +267,8 @@ const routerExtension = <
     state.widgetEnabled = false;
     state.debugHistory = [];
     state.accumulatedCost = 0;
+    lastPersistedSnapshot = undefined;
+    resetCountedMessageCosts();
     state.lastNonRouterModel =
       ctx.model && ctx.model.provider !== 'router'
         ? `${ctx.model.provider}/${ctx.model.id}`
@@ -313,20 +312,13 @@ const routerExtension = <
         savedState.lastNonRouterModel ?? state.lastNonRouterModel;
       state.accumulatedCost = savedState.accumulatedCost ?? 0;
       state.lastDecision = savedState.lastDecision;
+    }
 
-      for (let i = 0; i <= lastRouterStateIndex; i++) {
+    for (let i = 0; i < entries.length; i++) {
+      if (lastRouterStateIndex >= 0 && i > lastRouterStateIndex) {
+        recordUsageCost(entries[i]);
+      } else {
         markMessageCostCounted(entries[i]);
-      }
-      for (let i = lastRouterStateIndex + 1; i < entries.length; i++) {
-        if (state.routerEnabled) {
-          state.accumulatedCost += extractUncountedMessageCost(entries[i]);
-        } else {
-          markMessageCostCounted(entries[i]);
-        }
-      }
-    } else {
-      for (const entry of entries) {
-        markMessageCostCounted(entry);
       }
     }
 
@@ -398,34 +390,24 @@ const routerExtension = <
 
   const syncTrailingBranchUsage = (ctx: TCtx) => {
     const entries = ctx.sessionManager?.getBranch?.();
-    if (!entries || entries.length === 0) return;
-    let addedCost = 0;
+    if (!entries) return;
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i];
       if (entry.type === 'custom' && entry.customType === 'router-state') {
         break;
       }
-      if (state.routerEnabled) {
-        addedCost += extractUncountedMessageCost(entry);
-      } else {
-        markMessageCostCounted(entry);
-      }
-    }
-    if (addedCost > 0) {
-      state.accumulatedCost += addedCost;
+      recordUsageCost(entry);
     }
   };
 
-  pi.on('session_compact', async (event, ctx) => {
+  const handleUsageEvent = async (event: unknown, ctx: TCtx) => {
     ensureInitializedFromContext(ctx);
-    if (state.routerEnabled) {
-      state.accumulatedCost += extractUncountedMessageCost(event);
-    } else {
-      markMessageCostCounted(event);
-    }
+    recordUsageCost(event);
     persistState();
     actions.updateStatus(ctx);
-  });
+  };
+
+  pi.on('session_compact', handleUsageEvent);
 
   pi.on('turn_start', async (_event, ctx) => {
     ensureInitializedFromContext(ctx);
@@ -456,16 +438,7 @@ const routerExtension = <
     actions.updateStatus(ctx);
   });
 
-  pi.on('turn_end', async (event, ctx) => {
-    ensureInitializedFromContext(ctx);
-    if (state.routerEnabled) {
-      state.accumulatedCost += extractUncountedMessageCost(event);
-    } else {
-      markMessageCostCounted(event);
-    }
-    persistState();
-    actions.updateStatus(ctx);
-  });
+  pi.on('turn_end', handleUsageEvent);
 
   pi.on('thinking_level_select', (event, ctx) => {
     ensureInitializedFromContext(ctx);
@@ -489,17 +462,12 @@ const routerExtension = <
     );
     persistState();
     actions.updateStatus(ctx);
-    const unsupported = getUnsupportedTiers(
+    notifyUnsupportedThinking(
+      ctx,
       state.currentConfig.profiles[state.selectedProfile],
+      'all',
       event.level,
-      ctx.modelRegistry,
     );
-    if (unsupported.length > 0) {
-      ctx.ui.notify(
-        formatUnsupportedThinkingWarning('all', event.level, unsupported),
-        'warning',
-      );
-    }
   });
 };
 

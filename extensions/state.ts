@@ -3,7 +3,51 @@ import type {
   RouterThinkingByProfile,
   RoutingDecision,
   RouterPersistedState,
+  VirtualRouterState,
 } from './types';
+
+const normalizeDecisionForSnapshot = (
+  decision: RoutingDecision,
+): RoutingDecision => ({
+  profile: decision.profile,
+  tier: decision.tier,
+  phase: decision.phase,
+  targetProvider: decision.targetProvider,
+  targetModelId: decision.targetModelId,
+  targetLabel: decision.targetLabel,
+  reasoning: decision.reasoning,
+  thinking: decision.thinking,
+  timestamp: 0,
+  isClassifier: Boolean(decision.isClassifier),
+  isFallback: Boolean(decision.isFallback),
+  isBudgetForced: Boolean(decision.isBudgetForced),
+  isRuleMatched: Boolean(decision.isRuleMatched),
+});
+
+export const serializePersistedStateSnapshot = (
+  persisted: RouterPersistedState,
+): string =>
+  JSON.stringify({
+    ...persisted,
+    timestamp: 0,
+    lastDecision: persisted.lastDecision
+      ? normalizeDecisionForSnapshot(persisted.lastDecision)
+      : undefined,
+    debugHistory: persisted.debugHistory
+      ?.filter((d): d is RoutingDecision => Boolean(d))
+      .map(normalizeDecisionForSnapshot),
+  });
+
+export const isSameVirtualRouterState = (
+  prev: VirtualRouterState | undefined,
+  next: VirtualRouterState,
+): boolean =>
+  prev?.lastDecision !== undefined &&
+  prev.lastDecision !== null &&
+  prev.phase === next.phase &&
+  prev.tier === next.tier &&
+  JSON.stringify(normalizeDecisionForSnapshot(prev.lastDecision)) ===
+    JSON.stringify(normalizeDecisionForSnapshot(next.lastDecision));
 
 export const isRouterPersistedState = (
   value: unknown,

@@ -2,6 +2,15 @@
 
 All notable changes to `@yeliu84/pi-model-router` are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Omitted `off` from registered virtual model `thinkingLevels` when all configured tiers in a profile explicitly disallow `off` (such as `openai/gpt-6.2-astra` and `openai/gpt-6.2-sol` added in Pi `1.6.0`).
+- Deduplicated session state snapshotting, usage cost accounting, and unsupported thinking-level warning helpers across router modules.
+- Updated example configurations in `model-router.example.json` and `README.md` to current Pi `1.6.0` catalog models and `/llama` default port details.
+- Updated peer-tested Pi packages to `1.6.0`, `oxfmt` to `^0.79.0`, and `vitest` to `^5.1.1`.
+
 ## [0.5.5] - 2026-11-11
 
 ### Added

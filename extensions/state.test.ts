@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { isRouterPersistedState, buildPersistedState } from './state';
-import type { RoutingDecision } from './types';
+import {
+  isRouterPersistedState,
+  buildPersistedState,
+  serializePersistedStateSnapshot,
+  isSameVirtualRouterState,
+} from './state';
+import type { RoutingDecision, VirtualRouterState } from './types';
 
 describe('state.ts', () => {
   describe('isRouterPersistedState', () => {
@@ -88,6 +93,102 @@ describe('state.ts', () => {
       );
       expect(state.selectedProfile).toBe('');
       expect(state.pinTier).toBeUndefined();
+    });
+  });
+
+  describe('serializePersistedStateSnapshot & isSameVirtualRouterState', () => {
+    const baseDecision: RoutingDecision = {
+      profile: 'balanced',
+      tier: 'medium',
+      phase: 'implementation',
+      targetProvider: 'openai',
+      targetModelId: 'gpt-6.2-sol',
+      targetLabel: 'openai/gpt-6.2-sol',
+      reasoning: 'Preserved openai/gpt-6.2-sol for continuation.',
+      thinking: 'medium',
+      timestamp: 1000,
+    };
+
+    it('should serialize identical snapshots regardless of timestamps or omitted false flags', () => {
+      const stateA = {
+        ...buildPersistedState(
+          true,
+          'balanced',
+          {},
+          {},
+          false,
+          false,
+          [baseDecision],
+          baseDecision,
+          undefined,
+          0.01,
+        ),
+        timestamp: 1000,
+      };
+      const decisionWithFalseFlags: RoutingDecision = {
+        ...baseDecision,
+        isFallback: false,
+        isClassifier: false,
+        isBudgetForced: false,
+        isRuleMatched: false,
+        timestamp: 2000,
+      };
+      const stateB = {
+        ...buildPersistedState(
+          true,
+          'balanced',
+          {},
+          {},
+          false,
+          false,
+          [decisionWithFalseFlags],
+          decisionWithFalseFlags,
+          undefined,
+          0.01,
+        ),
+        timestamp: 2000,
+      };
+
+      expect(serializePersistedStateSnapshot(stateA)).toBe(
+        serializePersistedStateSnapshot(stateB),
+      );
+    });
+
+    it('should detect equivalent and differing VirtualRouterState objects', () => {
+      const prev: VirtualRouterState = {
+        phase: 'implementation',
+        tier: 'medium',
+        lastDecision: baseDecision,
+      };
+      const sameNext: VirtualRouterState = {
+        phase: 'implementation',
+        tier: 'medium',
+        lastDecision: {
+          ...baseDecision,
+          timestamp: 9999,
+          isFallback: false,
+        },
+      };
+      const changedNext: VirtualRouterState = {
+        ...sameNext,
+        lastDecision: {
+          ...sameNext.lastDecision,
+          isFallback: true,
+        },
+      };
+
+      expect(isSameVirtualRouterState(undefined, prev)).toBe(false);
+      expect(
+        isSameVirtualRouterState(
+          {
+            phase: 'implementation',
+            tier: 'medium',
+          } as VirtualRouterState,
+          prev,
+        ),
+      ).toBe(false);
+      expect(isSameVirtualRouterState(prev, sameNext)).toBe(true);
+      expect(isSameVirtualRouterState(prev, changedNext)).toBe(false);
     });
   });
 });

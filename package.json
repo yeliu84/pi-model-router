@@ -1,6 +1,6 @@
 {
   "name": "@yeliu84/pi-model-router",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "type": "module",
   "files": [
     "CHANGELOG.md",

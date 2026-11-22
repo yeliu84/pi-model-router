@@ -2,7 +2,7 @@
 
 All notable changes to `@yeliu84/pi-model-router` are documented in this file.
 
-## [Unreleased]
+## [0.5.6] - 2026-11-22
 
 ### Changed
 
@@ -10,6 +10,11 @@ All notable changes to `@yeliu84/pi-model-router` are documented in this file.
 - Deduplicated session state snapshotting, usage cost accounting, and unsupported thinking-level warning helpers across router modules.
 - Updated example configurations in `model-router.example.json` and `README.md` to current Pi `1.6.0` catalog models and `/llama` default port details.
 - Updated peer-tested Pi packages to `1.6.0`, `oxfmt` to `^0.79.0`, and `vitest` to `^5.1.1`.
+
+### Fixed
+
+- Re-tallied post-snapshot branch costs cleanly and cleared snapshot deduplication state during in-session `/tree` navigation (`restoreStateFromSession`).
+- Hardened virtual router state comparison and persisted state snapshotting against partial or nullish `lastDecision` entries.
 
 ## [0.5.5] - 2026-11-11
 

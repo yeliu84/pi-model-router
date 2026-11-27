@@ -449,13 +449,36 @@ export const registerCommands = <
     );
   };
 
+  const WIDGET_MODES = ['on', 'off', 'toggle'] as const;
+  const DEBUG_MODES = ['on', 'off', 'toggle', 'clear', 'show'] as const;
+
   const handleFix = async (args: string[], ctx: TCtx) => {
-    if (args.length !== 1) {
+    if (args.length > 1) {
       ctx.ui.notify('Usage: /router fix <high|medium|low>', 'error');
       return;
     }
-    const tier = args[0]?.toLowerCase();
-    if (!ROUTER_TIERS.includes(tier as RouterTier)) {
+    let tier = args[0]?.toLowerCase();
+    if (!tier) {
+      if (ctx.hasUI && ctx.ui.select) {
+        if (!state.lastDecision) {
+          ctx.ui.notify('No recent routing decision to fix.', 'warning');
+          return;
+        }
+        const interactive = await promptInteractiveChoice(
+          ctx,
+          `Fix router/${state.lastDecision.profile} decision`,
+          ROUTER_TIERS,
+          state.lastDecision.tier,
+          'last routed',
+        );
+        if (!interactive.handled || !interactive.value) return;
+        tier = interactive.value;
+      } else {
+        ctx.ui.notify('Usage: /router fix <high|medium|low>', 'error');
+        return;
+      }
+    }
+    if (!isRouterTier(tier)) {
       ctx.ui.notify('Usage: /router fix <high|medium|low>', 'error');
       return;
     }
@@ -463,7 +486,7 @@ export const registerCommands = <
       ctx.ui.notify('No recent routing decision to fix.', 'warning');
       return;
     }
-    state.pinnedTierByProfile[state.lastDecision.profile] = tier as RouterTier;
+    state.pinnedTierByProfile[state.lastDecision.profile] = tier;
     actions.persistState();
     actions.updateStatus(ctx);
     ctx.ui.notify(
@@ -588,36 +611,36 @@ export const registerCommands = <
           );
         }
         case 'fix': {
-          const fixPrefix = subArgs[0] ?? '';
-          const items = ['high', 'medium', 'low']
-            .filter((t) => t.startsWith(fixPrefix.toLowerCase()))
-            .map((t) => ({
+          const fixPrefix = (subArgs[0] ?? '').toLowerCase();
+          const items = ROUTER_TIERS.filter((t) => t.startsWith(fixPrefix)).map(
+            (t) => ({
               value: `fix ${t}`,
               label: t,
               description: `Correct decision and pin to ${t} tier`,
-            }));
+            }),
+          );
           return items.length > 0 ? items : null;
         }
         case 'widget': {
           const widgetPrefix = subArgs[0] ?? '';
-          const items = ['on', 'off', 'toggle']
-            .filter((v) => v.startsWith(widgetPrefix))
-            .map((v) => ({
-              value: `widget ${v}`,
-              label: v,
-              description: `Set widget to ${v}`,
-            }));
+          const items = WIDGET_MODES.filter((v) =>
+            v.startsWith(widgetPrefix),
+          ).map((v) => ({
+            value: `widget ${v}`,
+            label: v,
+            description: `Set widget to ${v}`,
+          }));
           return items.length > 0 ? items : null;
         }
         case 'debug': {
           const debugPrefix = subArgs[0] ?? '';
-          const items = ['on', 'off', 'toggle', 'clear', 'show']
-            .filter((v) => v.startsWith(debugPrefix))
-            .map((v) => ({
-              value: `debug ${v}`,
-              label: v,
-              description: `Router debug: ${v}`,
-            }));
+          const items = DEBUG_MODES.filter((v) =>
+            v.startsWith(debugPrefix),
+          ).map((v) => ({
+            value: `debug ${v}`,
+            label: v,
+            description: `Router debug: ${v}`,
+          }));
           return items.length > 0 ? items : null;
         }
       }
@@ -668,10 +691,10 @@ export const registerCommands = <
               'Router Subcommands:',
               '  status                      Show current status, profile, pin, cost, and last decision.',
               '  profile [name]              Switch to a profile (enables router if off). Lists available if no name.',
-              '  pin <tier|auto>             Force a tier (high|medium|low) or set to auto.',
+              '  pin [tier|auto]             Force a tier (high|medium|low) or set to auto.',
               '  thinking [tier] <level>     Override thinking level (off|minimal|...|max|auto). Not all tier models may support every level.',
               '  disable                     Disable the router and restore the last used non-router model.',
-              '  fix <tier>                  Correct the last routing decision and pin that tier for the current profile.',
+              '  fix [tier]                  Correct the last routing decision and pin that tier for the current profile.',
               '  widget <on|off|toggle>      Control the persistent status widget visibility.',
               '  debug <on|off|show|clear>   Control routing debug logging to notifications and history.',
               '  reload                      Hot-reload the configuration JSON from .pi/model-router.json.',

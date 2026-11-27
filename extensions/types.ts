@@ -194,9 +194,9 @@ export interface RouterExtensionAPI<
       | 'session_start'
       | 'session_tree'
       | 'session_compact'
-      | 'session_compact_failed'
       | 'turn_start'
-      | 'turn_end',
+      | 'turn_end'
+      | 'agent_end',
     handler: (event: unknown, ctx: TCtx) => Promise<void> | void,
   ): void;
   on(
@@ -311,8 +311,11 @@ export interface ParsedConfigFile {
 }
 
 export interface CustomSessionEntry {
+  id?: string;
   type: string;
   customType?: string;
+  targetId?: string;
+  replacement?: unknown;
   data?: unknown;
   message?: unknown;
   usage?: unknown;

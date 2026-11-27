@@ -73,15 +73,22 @@ const extractSingleUsageCost = (item: unknown): number => {
   if (item.type === 'message') {
     return extractSingleUsageCost(item.message);
   }
-  if (!isBillableUsageRecord(item) || countedObjects.has(item)) {
+  const usageObj = isObjectRecord(item.usage) ? item.usage : undefined;
+  if (
+    !isBillableUsageRecord(item) ||
+    countedObjects.has(item) ||
+    (usageObj !== undefined && countedObjects.has(usageObj))
+  ) {
     return 0;
   }
   countedObjects.add(item);
   const total =
-    isObjectRecord(item.usage) && isObjectRecord(item.usage.cost)
-      ? item.usage.cost.total
-      : undefined;
-  return typeof total === 'number' && total > 0 ? total : 0;
+    usageObj && isObjectRecord(usageObj.cost) ? usageObj.cost.total : undefined;
+  if (typeof total === 'number' && total > 0 && usageObj) {
+    countedObjects.add(usageObj);
+    return total;
+  }
+  return 0;
 };
 
 export const extractUncountedMessageCost = (input: unknown): number => {
@@ -240,17 +247,26 @@ const preferCandidates = (
   return preferred.length > 0 ? [...preferred, ...rest] : candidates;
 };
 
+const unwrapOriginalReasoning = (reasoning: string): string => {
+  const marker = ' (Original: ';
+  const idx = reasoning.indexOf(marker);
+  return idx !== -1 && reasoning.endsWith(')')
+    ? reasoning.slice(idx + marker.length, -1)
+    : reasoning;
+};
+
 const formatModelSwitchReasoning = (
   resolvedRef: string,
   tier: RouterTier,
   originalTarget: string,
-  baseReasoning: string,
+  rawReasoning: string,
   reason: ModelRouteRequest<VirtualRouterState>['reason'],
   failed: ModelRouteRequest<VirtualRouterState>['failed'],
   preCooldownFirst: string | undefined,
   preCooldownRemainingMs: number,
   isPrimaryRecovery: boolean,
 ): string => {
+  const baseReasoning = unwrapOriginalReasoning(rawReasoning);
   if (reason === 'retry' && failed) {
     const errSuffix = failed.message.errorMessage
       ? ` (${failed.message.errorMessage})`
@@ -274,7 +290,7 @@ const formatModelSwitchReasoning = (
   if (resolvedRef !== originalTarget) {
     return `Preserved fallback ${resolvedRef} for ${tier} tier. (Original: ${baseReasoning})`;
   }
-  return baseReasoning;
+  return rawReasoning;
 };
 
 const supportsReasoning = (
@@ -403,6 +419,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
   actions: RouterProviderActions<TContext>,
 ): Promise<ModelRoute<VirtualRouterState>> => {
   try {
+    request.signal?.throwIfAborted();
     const ctxRegistry =
       ctx &&
       typeof ctx === 'object' &&
@@ -446,6 +463,12 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         return {
           ok: false,
           error: `Routed model not found: ${provider}/${modelId}`,
+        };
+      }
+      if (targetModel.api === 'pi-virtual') {
+        return {
+          ok: false,
+          error: `Invalid routed target "${modelRef}": cannot route to virtual model.`,
         };
       }
       if (
@@ -563,7 +586,6 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         ),
       );
       const resolved = resolveFirstAvailableModel(candidates);
-      state.inFlightModelRef = resolved.modelRef;
       const { delegatedThinking } = resolveDelegatedThinking(
         directTier,
         tierConfig.thinking ?? directTier,
@@ -592,7 +614,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       state.currentConfig.maxSessionBudget !== undefined &&
       state.accumulatedCost >= state.currentConfig.maxSessionBudget;
 
-    const context: Context = { messages: [...request.messages] };
+    const context: Context = { messages: request.messages as Message[] };
     const turnUserMessage = resolveTurnUserMessage(
       context,
       ctxSessionManager?.getBranch?.(),
@@ -620,7 +642,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
           profile,
           downgradedTier,
           phaseForTier(downgradedTier),
-          `Budget exceeded. Downgraded from high to ${downgradedTier} tier. (Original: ${previousDecision.reasoning})`,
+          `Budget exceeded. Downgraded from high to ${downgradedTier} tier. (Original: ${unwrapOriginalReasoning(previousDecision.reasoning)})`,
           state.thinkingByProfile[profileName],
           previousDecision.isClassifier,
         );
@@ -629,12 +651,10 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         decision = {
           ...previousDecision,
           timestamp: Date.now(),
-          reasoning:
-            isContinuation &&
-            !previousDecision.reasoning.startsWith('Preserved ')
-              ? `Preserved ${previousDecision.targetLabel} for tool-result continuation ` +
-                `to maintain prompt cache and thinking state. (Original: ${previousDecision.reasoning})`
-              : previousDecision.reasoning,
+          reasoning: isContinuation
+            ? `Preserved ${previousDecision.targetLabel} for tool-result continuation ` +
+              `to maintain prompt cache and thinking state. (Original: ${unwrapOriginalReasoning(previousDecision.reasoning)})`
+            : previousDecision.reasoning,
         };
       }
     } else {
@@ -675,6 +695,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         if (classifierResult?.cost) {
           state.accumulatedCost += classifierResult.cost;
         }
+        request.signal?.throwIfAborted();
         if (classifierResult) {
           const classifiedTier = resolveAvailableTier(
             profile,
@@ -826,10 +847,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       resolved.modelRef ===
         `${request.failed.model.provider}/${request.failed.model.id}`
     ) {
-      const baseReasoning = decision.reasoning.replace(
-        /^Retrying [^\s]+ after context compaction recovery\. \(Original: (.*)\)$/s,
-        '$1',
-      );
+      const baseReasoning = unwrapOriginalReasoning(decision.reasoning);
       decision = {
         ...decision,
         targetProvider: resolved.provider,

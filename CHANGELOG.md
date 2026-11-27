@@ -2,6 +2,25 @@
 
 All notable changes to `@yeliu84/pi-model-router` are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Interactive `ctx.ui.select()` tier picker (`blockedKind: 'question'`) when running `/router fix` without arguments in UI-capable sessions.
+- Vision-aware candidate selection and cross-provider fallback for `"classifierModel": "auto"` across configured native decision providers (including built-in Radius `pi-decision` classifiers in Pi `1.7.0`).
+
+### Changed
+
+- Updated peer-tested Pi packages to `1.7.0` and documented `--agent-dir` / `PI_CODING_AGENT_DIR` global configuration resolution.
+- Optimized heuristic routing hot paths and stabilized continuation state reasoning across fallback chains to avoid nested `(Original: ...)` growth and redundant session state entries.
+
+### Fixed
+
+- Preserved in-flight physical model cooldown tracking (`inFlightModelRef`) across `direct` summarization requests and Pi's pre-request threshold auto-compaction inside `prepareRequest`, and cleared stale in-flight state on `agent_end`.
+- Prevented multi-turn session budget double-counting when projected messages are shallow-cloned by `context_edit`, `blockImages`, or `context` hooks.
+- Respected `context_edit` omissions (`replacement: null`) and non-omitted error assistant boundaries when resolving authoritative user prompts on `sessionManager.getBranch()`.
+- Guarded async classifier routing against mid-flight Escape/abort signals so cancelled turns do not auto-pin first-turn heuristic fallback decisions or mutate router state, rejected non-`router` virtual targets (`api === 'pi-virtual'`) in fallback chains, and preserved colons in chat-LLM classifier `Reasoning:` lines.
+
 ## [0.5.7] - 2026-11-27
 
 ### Added

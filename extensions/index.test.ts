@@ -1161,6 +1161,64 @@ describe('index.ts (orchestrator)', () => {
           .at(-1)?.[1]
           ?.some((line) => line.includes('Cooldowns:')),
       ).toBe(false);
+
+      // Pre-request threshold auto-compaction inside prepareRequest:
+      // route(user) -> route(direct) -> session_compact -> after_provider_response(429)
+      // must preserve inFlightModelRef for the routed user turn rather than clobbering/clearing it
+      const preCompactRoute = await registeredVm!.route(
+        {
+          model: createTestModel({ provider: 'router', id: 'balanced' }),
+          thinkingLevel: 'high',
+          reason: 'user',
+          messages: [
+            {
+              role: 'user',
+              content: 'plan the architecture deeply',
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        mockCtx,
+      );
+      expect(preCompactRoute.model.id).toBe('gpt-4o');
+
+      // Compaction summary routes as 'direct' (may pick medium gpt-4o-mini if no matching tier) and emits session_compact
+      await registeredVm!.route(
+        {
+          model: createTestModel({ provider: 'router', id: 'balanced' }),
+          thinkingLevel: 'medium',
+          reason: 'direct',
+          messages: [],
+        },
+        mockCtx,
+      );
+      for (const handler of eventListeners['session_compact'] || []) {
+        await handler({ compactionEntry: { type: 'compaction' } }, mockCtx);
+      }
+
+      // Now the routed turn request to openai/gpt-4o hits 429 -> cooldown MUST be recorded for openai/gpt-4o!
+      mockCtx.ui.setWidget.mockClear();
+      for (const handler of eventListeners['after_provider_response'] || []) {
+        await handler(
+          { status: 429, headers: { 'retry-after': '45' } },
+          mockCtx,
+        );
+      }
+      expect(
+        mockCtx.ui.setWidget.mock.calls
+          .at(-1)?.[1]
+          ?.some((line) => line.includes('Cooldowns: openai/gpt-4o (45s)')),
+      ).toBe(true);
+
+      // agent_end clears inFlightModelRef defensively even if turn_end was skipped
+      for (const handler of eventListeners['agent_end'] || []) {
+        await handler({}, mockCtx);
+      }
+      mockCtx.ui.setWidget.mockClear();
+      for (const handler of eventListeners['after_provider_response'] || []) {
+        await handler({ status: 200, headers: {} }, mockCtx);
+      }
+      expect(mockCtx.ui.setWidget).not.toHaveBeenCalled();
     });
   });
 });

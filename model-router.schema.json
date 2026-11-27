@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/yeliu84/pi-model-router/main/model-router.schema.json",
   "title": "Pi Model Router Configuration",
-  "description": "Configuration schema for pi-model-router (~/.pi/agent/model-router.json or .pi/model-router.json).",
+  "description": "Configuration schema for pi-model-router (~/.pi/agent/model-router.json via --agent-dir / PI_CODING_AGENT_DIR, or .pi/model-router.json).",
   "type": "object",
   "properties": {
     "$schema": {
@@ -20,7 +20,7 @@
       "description": "Automatically pin the active router profile to the tier selected on the first turn of a conversation. Use '/router pin auto' to unpin and return to dynamic per-turn routing."
     },
     "classifierModel": {
-      "description": "Classifier model used to categorize user intent. Accepts \"auto\" (uses first available Pi native decision model such as Jev, Radius, GitHub Copilot gpt-6-luna-decisions / microsoft-decision-1, Clef, OpenAI GPT-6 Luna, OpenRouter System One, or llama.cpp classifier), a model alias from \"models\", a canonical \"provider/model\" reference, or an object with \"model\" and optional \"thinking\".",
+      "description": "Classifier model used to categorize user intent. Accepts \"auto\" (uses available Pi native decision models — preferring vision-capable classifiers when images are attached and falling back across configured providers on error — such as Jev, Radius, GitHub Copilot gpt-6-luna-decisions / microsoft-decision-1, Clef, OpenAI GPT-6 Luna, OpenRouter System One, or llama.cpp classifier), a model alias from \"models\", a canonical \"provider/model\" reference, or an object with \"model\" and optional \"thinking\".",
       "oneOf": [
         {
           "type": "string",

@@ -1418,6 +1418,118 @@ describe('provider.ts (virtual models)', () => {
       expect(extractUncountedMessageCost(preCountedMessageEntry.message)).toBe(
         0,
       );
+
+      // Shallow-cloned projected messages (e.g. context_edit, blockImages, or pi.on('context'))
+      // share the underlying usage object and must not be double-counted across turns
+      const originalAssistant = createAssistantMsg('with secret', 0.045);
+      expect(extractUncountedMessageCost(originalAssistant)).toBe(0.045);
+      const projectedClone = {
+        ...originalAssistant,
+        content: [{ type: 'text' as const, text: '[REDACTED]' }],
+      };
+      expect(extractUncountedMessageCost(projectedClone)).toBe(0);
+    });
+  });
+
+  describe('direct isolation, virtual target guard, abort handling, and reasoning unwrapping', () => {
+    it('should not mutate inFlightModelRef on direct requests, reject virtual targets, abort cleanly during classification, and keep continuation state flat', async () => {
+      // 1. Direct requests preserve existing inFlightModelRef
+      mockState.inFlightModelRef = 'openai/gpt-4o';
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      const directRoute = await vm.route(
+        buildRequest({ reason: 'direct' }),
+        mockState.lastExtensionContext!,
+      );
+      expect(directRoute.model.id).toBe('gpt-4o-mini');
+      expect(mockState.inFlightModelRef).toBe('openai/gpt-4o');
+
+      // 2. Rejects virtual targets (api === 'pi-virtual') under non-router providers and falls back to physical model
+      mockState.currentConfig.profiles.balanced.medium = {
+        model: 'jev/auto',
+        fallbacks: ['openai/gpt-4o-mini'],
+      };
+      const baseRegistry = mockState.currentModelRegistry!;
+      mockState.currentModelRegistry = {
+        ...baseRegistry,
+        find: (provider: string, modelId: string) => {
+          if (provider === 'jev' && modelId === 'auto') {
+            return createTestModel({
+              provider: 'jev',
+              id: 'auto',
+              api: 'pi-virtual' as Api,
+            });
+          }
+          return baseRegistry.find(provider, modelId);
+        },
+      };
+      mockState.lastExtensionContext = {
+        modelRegistry: mockState.currentModelRegistry,
+      };
+      const fallbackFromVirtual = await vm.route(
+        buildRequest({
+          messages: [
+            { role: 'user', content: 'fix bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext,
+      );
+      expect(fallbackFromVirtual.model.provider).toBe('openai');
+      expect(fallbackFromVirtual.model.id).toBe('gpt-4o-mini');
+
+      // Consecutive continuations after fallback produce identical state without nested "(Original: ... (Original: ...))"
+      const cont1 = await vm.route(
+        buildRequest({
+          reason: 'continuation',
+          state: fallbackFromVirtual.state,
+        }),
+        mockState.lastExtensionContext,
+      );
+      const cont2 = await vm.route(
+        buildRequest({ reason: 'continuation', state: cont1.state }),
+        mockState.lastExtensionContext,
+      );
+      expect(cont2.state).toBe(cont1.state);
+      expect(cont2.state?.lastDecision.reasoning.match(/\(Original:/g)).toEqual(
+        ['(Original:'],
+      );
+
+      // 3. Aborting during async classifier does not auto-pin first turn or update lastDecision
+      const abortController = new AbortController();
+      mockState.currentConfig.autoPinFirstTurnDecision = true;
+      mockState.currentConfig.classifierModel = { model: 'auto' };
+      delete mockState.pinnedTierByProfile.balanced;
+      mockState.lastDecision = undefined;
+      mockState.currentModelRegistry = {
+        ...baseRegistry,
+        getAvailableOfType: vi.fn().mockImplementation(async () => {
+          abortController.abort(new Error('User pressed Escape'));
+          return [];
+        }),
+        classify: vi.fn(),
+      };
+      mockState.lastExtensionContext = {
+        modelRegistry: mockState.currentModelRegistry,
+      };
+
+      await expect(
+        vm.route(
+          buildRequest({
+            signal: abortController.signal,
+            messages: [
+              {
+                role: 'user',
+                content: 'plan architecture',
+                timestamp: Date.now(),
+              },
+            ],
+          }),
+          mockState.lastExtensionContext,
+        ),
+      ).rejects.toThrow('User pressed Escape');
+      expect(mockState.pinnedTierByProfile.balanced).toBeUndefined();
+      expect(mockState.lastDecision).toBeUndefined();
     });
   });
 });

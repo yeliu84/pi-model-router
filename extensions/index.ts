@@ -418,12 +418,9 @@ const routerExtension = <
     actions.updateStatus(ctx);
   };
 
-  pi.on('session_compact', async (event, ctx) => {
-    state.inFlightModelRef = undefined;
-    await handleUsageEvent(event, ctx);
-  });
+  pi.on('session_compact', handleUsageEvent);
 
-  pi.on('session_compact_failed', () => {
+  pi.on('agent_end', () => {
     state.inFlightModelRef = undefined;
   });
 

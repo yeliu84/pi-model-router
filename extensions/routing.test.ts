@@ -1224,5 +1224,254 @@ describe('routing.ts', () => {
         extractLastUserImages(ctxWithSummariesAndInjection, turnUser),
       ).toEqual([{ type: 'image', data: 'realpng', mimeType: 'image/png' }]);
     });
+
+    it('should respect context_edit omissions (replacement: null) and non-omitted error assistants when resolving turn user messages', () => {
+      const bashMsgConverted: Message = {
+        role: 'user',
+        content: [{ type: 'text', text: 'Ran `ls`\n```\nREADME.md\n```' }],
+        timestamp: 1,
+      };
+      const realUserMsg: Message = {
+        role: 'user',
+        content: [{ type: 'text', text: 'summarize the repo' }],
+        timestamp: 2,
+      };
+
+      // Case 1: trailing custom_message was omitted via context_edit (replacement: null),
+      // so context.messages only has [bashMsgConverted, realUserMsg]. Must NOT step back onto bashMsgConverted!
+      const ctxWithOmittedCustom: Context = {
+        messages: [bashMsgConverted, realUserMsg],
+      };
+      const resolvedAfterOmittedCustom = resolveTurnUserMessage(
+        ctxWithOmittedCustom,
+        [
+          {
+            id: 'b1',
+            type: 'message',
+            message: { role: 'bashExecution', excludeFromContext: false },
+          },
+          { id: 'u1', type: 'message', message: realUserMsg },
+          { id: 'c1', type: 'custom_message', customType: 'injected' },
+          {
+            id: 'e1',
+            type: 'context_edit',
+            targetId: 'c1',
+            replacement: null,
+          },
+        ],
+      );
+      expect(resolvedAfterOmittedCustom).toBe(realUserMsg);
+
+      // Case 2: previous turn ended with a non-omitted error assistant (carrying id), followed by two custom_messages
+      const failedAssistant: AssistantMessage = {
+        ...createAssistantMsg(''),
+        stopReason: 'error',
+        errorMessage: '400 Bad Request',
+      };
+      const custom1: Message = {
+        role: 'user',
+        content: 'earlier custom context',
+        timestamp: 3,
+      };
+      const custom2: Message = {
+        role: 'user',
+        content: 'plan the architecture',
+        timestamp: 4,
+      };
+      const ctxAfterFailedAssistant: Context = {
+        messages: [realUserMsg, failedAssistant, custom1, custom2],
+      };
+      const resolvedCustomTurn = resolveTurnUserMessage(
+        ctxAfterFailedAssistant,
+        [
+          { id: 'u1', type: 'message', message: realUserMsg },
+          { id: 'a1', type: 'message', message: failedAssistant },
+          { id: 'c1', type: 'custom_message', customType: 'ctx' },
+          { id: 'c2', type: 'custom_message', customType: 'trigger' },
+        ],
+      );
+      expect(resolvedCustomTurn).toBe(custom2);
+
+      // Case 3: retry/overflow recovery omitted the failed assistant via context_edit (replacement: null)
+      const injectedAfterUser: Message = {
+        role: 'user',
+        content: 'injected system reminder',
+        timestamp: 5,
+      };
+      const ctxRetryAfterOmittedAssistant: Context = {
+        messages: [realUserMsg, injectedAfterUser],
+      };
+      const resolvedRetryTurn = resolveTurnUserMessage(
+        ctxRetryAfterOmittedAssistant,
+        [
+          { id: 'u1', type: 'message', message: realUserMsg },
+          { id: 'c1', type: 'custom_message', customType: 'reminder' },
+          { id: 'a1', type: 'message', message: failedAssistant },
+          {
+            id: 'e1',
+            type: 'context_edit',
+            targetId: 'a1',
+            replacement: null,
+          },
+        ],
+      );
+      expect(resolvedRetryTurn).toBe(realUserMsg);
+    });
+
+    it('should prefer image-capable classifier on auto with images, fall back across providers on error, and respect abort signals', async () => {
+      const textOnlyFree: ClassifierModel<'typesafe-system-one'> = {
+        type: 'classifier',
+        id: 'antdigital/lingdt-decision-fast-1.0:free',
+        name: 'LingDT Decision Fast',
+        api: 'typesafe-system-one',
+        provider: 'openrouter',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        input: ['text'],
+        contextWindow: 32768,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+      const radiusVision: ClassifierModel<'pi-decision'> = {
+        type: 'classifier',
+        id: 'decision-1',
+        name: 'Radius Decision 1',
+        api: 'pi-decision',
+        provider: 'radius',
+        baseUrl: 'https://radius.pi.dev/v1',
+        input: ['text', 'image'],
+        contextWindow: 131072,
+        cost: { input: 0.05, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const imageCtx: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Inspect this screenshot' },
+              { type: 'image', data: 'pngdata', mimeType: 'image/png' },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      };
+
+      // 1. With image attached, 'auto' skips text-only first model in favor of vision-capable Radius classifier,
+      // and when Radius errors out, falls back to the second provider (OpenRouter text-only)
+      const classifyFn = vi
+        .fn()
+        .mockResolvedValueOnce({
+          api: 'pi-decision',
+          provider: 'radius',
+          model: 'decision-1',
+          stopReason: 'error',
+          errorMessage: 'Radius 503',
+          timestamp: Date.now(),
+          answers: {},
+        } satisfies ClassifierResult)
+        .mockResolvedValueOnce({
+          api: 'pi-decision',
+          provider: 'radius',
+          model: 'decision-1',
+          stopReason: 'error',
+          errorMessage: 'Radius text retry 503',
+          timestamp: Date.now(),
+          answers: {},
+        } satisfies ClassifierResult)
+        .mockResolvedValueOnce({
+          api: 'typesafe-system-one',
+          provider: 'openrouter',
+          model: 'antdigital/lingdt-decision-fast-1.0:free',
+          stopReason: 'stop',
+          timestamp: Date.now(),
+          usage: {
+            input: 120,
+            output: 5,
+            reasoning: 3,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 125,
+            cost: {
+              input: 0.00002,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0.00002,
+            },
+          },
+          answers: {
+            tier: {
+              type: 'choice',
+              choice: 'medium',
+              probabilities: { high: 0.1, medium: 0.8, low: 0.1 },
+              confidence: 0.7,
+            },
+          },
+        } satisfies ClassifierResult);
+
+      const fallbackRes = await runNativeClassifier(
+        'auto',
+        {
+          ...mockRegistry,
+          getAvailableOfType: vi
+            .fn()
+            .mockResolvedValue([textOnlyFree, radiusVision]),
+          classify: classifyFn,
+        },
+        imageCtx,
+      );
+      expect(classifyFn.mock.calls[0][0]).toBe(radiusVision);
+      expect(classifyFn.mock.calls[2][0]).toBe(textOnlyFree);
+      expect(fallbackRes).toEqual({
+        tier: 'medium',
+        reasoning:
+          'openrouter/antdigital/lingdt-decision-fast-1.0:free selected medium (p=80%, conf=70%).',
+        cost: 0.00002,
+      });
+
+      // 2. Aborted signal short-circuits without calling classify or streamSimple
+      const abortController = new AbortController();
+      abortController.abort();
+      const abortedClassify = vi.fn();
+      const abortedStream = vi.fn();
+      const abortedRes = await runClassifier(
+        'openai/gpt-4o',
+        {
+          ...mockRegistry,
+          classify: abortedClassify,
+          streamSimple: abortedStream,
+        },
+        imageCtx,
+        undefined,
+        undefined,
+        0.5,
+        abortController.signal,
+      );
+      expect(abortedRes).toBeUndefined();
+      expect(abortedClassify).not.toHaveBeenCalled();
+      expect(abortedStream).not.toHaveBeenCalled();
+    });
+
+    it('should preserve colons in chat LLM classifier Reasoning lines and handle markdown formatting', async () => {
+      const mockStream = createTextDeltaStream(
+        '**Tier**: **high**\n',
+        '**Reasoning**: Architecture review: requires cross-module schema migration.',
+      );
+
+      const res = await runClassifier(
+        'openai/gpt-4o',
+        {
+          ...mockRegistry,
+          streamSimple: vi
+            .fn<() => AssistantMessageEventStream>()
+            .mockReturnValue(mockStream),
+        },
+        context,
+      );
+      expect(res).toEqual({
+        tier: 'high',
+        reasoning:
+          'Architecture review: requires cross-module schema migration.',
+      });
+    });
   });
 });

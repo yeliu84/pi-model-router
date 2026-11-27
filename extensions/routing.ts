@@ -75,9 +75,26 @@ const countTrailingConvertedUserEntries = (
   entries: readonly CustomSessionEntry[] | undefined,
 ): number => {
   if (!entries) return 0;
+  const omittedIds = new Set<string>();
+  const editedIds = new Set<string>();
   let count = 0;
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
+    if (entry.type === 'context_edit' && typeof entry.targetId === 'string') {
+      if (!editedIds.has(entry.targetId)) {
+        editedIds.add(entry.targetId);
+        if (entry.replacement === null) {
+          omittedIds.add(entry.targetId);
+        }
+      }
+      continue;
+    }
+    if (typeof entry.id === 'string' && omittedIds.has(entry.id)) {
+      continue;
+    }
+    if (entry.type === 'compaction') {
+      return 0;
+    }
     if (entry.type === 'custom_message') {
       count++;
       continue;
@@ -87,7 +104,7 @@ const countTrailingConvertedUserEntries = (
     }
     if (
       entry.message.role === 'assistant' &&
-      entry.message.stopReason !== 'error'
+      (typeof entry.id === 'string' || entry.message.stopReason !== 'error')
     ) {
       return 0;
     }
@@ -111,19 +128,26 @@ export const resolveTurnUserMessage = (
 ): Message | undefined => {
   const trailingConverted = countTrailingConvertedUserEntries(entries);
   if (trailingConverted > 0) {
-    const lastAssistantIdx = context.messages.findLastIndex(
-      (m) => m.role === 'assistant',
-    );
-    const turnUsers = context.messages
-      .slice(lastAssistantIdx + 1)
-      .filter((m) => m.role === 'user' && !isSyntheticSummaryMessage(m));
-    if (turnUsers.length > 0) {
-      return turnUsers[Math.max(0, turnUsers.length - 1 - trailingConverted)];
+    let skipped = 0;
+    let earliestTurnUser: Message | undefined;
+    for (let i = context.messages.length - 1; i >= 0; i--) {
+      const msg = context.messages[i];
+      if (msg.role === 'assistant') break;
+      if (msg.role === 'user' && !isSyntheticSummaryMessage(msg)) {
+        earliestTurnUser = msg;
+        if (skipped === trailingConverted) return msg;
+        skipped++;
+      }
+    }
+    if (earliestTurnUser) return earliestTurnUser;
+  }
+  for (let i = context.messages.length - 1; i >= 0; i--) {
+    const msg = context.messages[i];
+    if (msg.role === 'user' && !isSyntheticSummaryMessage(msg)) {
+      return msg;
     }
   }
-  return context.messages.findLast(
-    (m) => m.role === 'user' && !isSyntheticSummaryMessage(m),
-  );
+  return undefined;
 };
 
 export const getLastUserText = (
@@ -164,12 +188,27 @@ export const countWords = (text: string): number => {
   return text.split(/\s+/).filter(Boolean).length;
 };
 
+const hasMinLines = (text: string, minLines: number): boolean => {
+  let newlines = 0;
+  let pos = 0;
+  while ((pos = text.indexOf('\n', pos)) !== -1) {
+    if (++newlines >= minLines - 1) return true;
+    pos++;
+  }
+  return false;
+};
+
 export const hasImageAttachment = (context: Context): boolean => {
-  return context.messages.some(
-    (message) =>
-      Array.isArray(message.content) &&
-      message.content.some((part) => part.type === 'image'),
-  );
+  for (let i = context.messages.length - 1; i >= 0; i--) {
+    const { content } = context.messages[i];
+    if (
+      Array.isArray(content) &&
+      content.some((part) => part.type === 'image')
+    ) {
+      return true;
+    }
+  }
+  return false;
 };
 
 export const extractLastUserImages = (
@@ -184,7 +223,10 @@ export const extractLastUserImages = (
     : [];
 };
 
-export const containsAny = (text: string, keywords: string[]): boolean => {
+export const containsAny = (
+  text: string,
+  keywords: readonly string[],
+): boolean => {
   return keywords.some((keyword) => text.includes(keyword));
 };
 
@@ -251,6 +293,100 @@ export const buildRoutingDecision = (
   };
 };
 
+const TIER_RANK: Readonly<Record<RouterTier, number>> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+};
+
+const EXPLICIT_HIGH_HINTS = [
+  'best',
+  'deep',
+  'deeply',
+  'carefully',
+  'thoroughly',
+  'robust',
+  'comprehensive',
+  'step by step',
+  'think hard',
+  'highest quality',
+  'ultrathink',
+] as const;
+
+const EXPLICIT_LOW_HINTS = [
+  'fast',
+  'cheap',
+  'quick',
+  'quickly',
+  'brief',
+  'briefly',
+  'one sentence',
+  'one line',
+  'tiny',
+  'small',
+] as const;
+
+const PLANNING_KEYWORDS = [
+  'plan',
+  'planning',
+  'architecture',
+  'architect',
+  'design',
+  'tradeoff',
+  'trade-off',
+  'research',
+  'investigate',
+  'root cause',
+  'analyze',
+  'analysis',
+  'migration',
+  'strategy',
+  'compare',
+  'options',
+  'approach',
+] as const;
+
+const SUMMARY_KEYWORDS = [
+  'summarize',
+  'summary',
+  'changelog',
+  'rewrite',
+  'reformat',
+  'format',
+  'rename',
+  'explain briefly',
+  'recap',
+  'tl;dr',
+] as const;
+
+const IMPLEMENTATION_KEYWORDS = [
+  'implement',
+  'code',
+  'fix',
+  'update',
+  'edit',
+  'write',
+  'refactor',
+  'add tests',
+  'patch',
+  'change',
+  'apply',
+  'continue',
+  'resume',
+  'make the changes',
+  'go ahead',
+] as const;
+
+const LOOKUP_KEYWORDS = [
+  'where is',
+  'which file',
+  'show me',
+  'list',
+  'what files',
+  'find',
+  'grep',
+] as const;
+
 export const decideRouting = (
   context: Context,
   profileName: string,
@@ -267,90 +403,7 @@ export const decideRouting = (
   const recentConversation = getRecentConversationText(context);
   const toolResultCount = countToolResults(context);
   const wordCount = countWords(prompt);
-  const multiLinePrompt = prompt.split('\n').length >= 4;
-
-  const explicitHighHints = [
-    'best',
-    'deep',
-    'deeply',
-    'carefully',
-    'thoroughly',
-    'robust',
-    'comprehensive',
-    'step by step',
-    'think hard',
-    'highest quality',
-    'ultrathink',
-  ];
-  const explicitLowHints = [
-    'fast',
-    'cheap',
-    'quick',
-    'quickly',
-    'brief',
-    'briefly',
-    'one sentence',
-    'one line',
-    'tiny',
-    'small',
-  ];
-  const planningKeywords = [
-    'plan',
-    'planning',
-    'architecture',
-    'architect',
-    'design',
-    'tradeoff',
-    'trade-off',
-    'research',
-    'investigate',
-    'root cause',
-    'analyze',
-    'analysis',
-    'migration',
-    'strategy',
-    'compare',
-    'options',
-    'approach',
-  ];
-  const summaryKeywords = [
-    'summarize',
-    'summary',
-    'changelog',
-    'rewrite',
-    'reformat',
-    'format',
-    'rename',
-    'explain briefly',
-    'recap',
-    'tl;dr',
-  ];
-  const implementationKeywords = [
-    'implement',
-    'code',
-    'fix',
-    'update',
-    'edit',
-    'write',
-    'refactor',
-    'add tests',
-    'patch',
-    'change',
-    'apply',
-    'continue',
-    'resume',
-    'make the changes',
-    'go ahead',
-  ];
-  const lookupKeywords = [
-    'where is',
-    'which file',
-    'show me',
-    'list',
-    'what files',
-    'find',
-    'grep',
-  ];
+  const multiLinePrompt = hasMinLines(prompt, 4);
 
   let phase: RouterPhase = previousDecision?.phase ?? 'implementation';
   let tier: RouterTier = 'medium';
@@ -366,11 +419,6 @@ export const decideRouting = (
     if (rules) {
       let highestTier: RouterTier | undefined;
       let winningRule: RoutingRule | undefined;
-      const tierRank: Record<RouterTier, number> = {
-        low: 1,
-        medium: 2,
-        high: 3,
-      };
 
       for (const rule of rules) {
         const matches = Array.isArray(rule.matches)
@@ -378,7 +426,7 @@ export const decideRouting = (
           : [rule.matches];
         const lowercaseMatches = matches.map((m) => m.toLowerCase());
         if (containsAny(prompt, lowercaseMatches)) {
-          if (!highestTier || tierRank[rule.tier] > tierRank[highestTier]) {
+          if (!highestTier || TIER_RANK[rule.tier] > TIER_RANK[highestTier]) {
             highestTier = rule.tier;
             winningRule = rule;
           }
@@ -413,22 +461,22 @@ export const decideRouting = (
             : 0),
       );
 
-      if (containsAny(prompt, explicitHighHints)) {
+      if (containsAny(prompt, EXPLICIT_HIGH_HINTS)) {
         phase = 'planning';
         tier = 'high';
         reasoning =
           'Detected an explicit request for deeper or higher-quality reasoning.';
-      } else if (containsAny(prompt, explicitLowHints)) {
+      } else if (containsAny(prompt, EXPLICIT_LOW_HINTS)) {
         phase = 'lightweight';
         tier = 'low';
         reasoning =
           'Detected an explicit request for a faster or lighter response.';
-      } else if (containsAny(prompt, summaryKeywords)) {
+      } else if (containsAny(prompt, SUMMARY_KEYWORDS)) {
         phase = 'lightweight';
         tier = 'low';
         reasoning = 'Detected summary or lightweight transformation keywords.';
       } else if (
-        containsAny(prompt, planningKeywords) ||
+        containsAny(prompt, PLANNING_KEYWORDS) ||
         prompt.startsWith('why ') ||
         wordCount >= highThreshold ||
         multiLinePrompt
@@ -439,13 +487,13 @@ export const decideRouting = (
           previousDecision?.phase === 'planning'
             ? 'Continued planning phase based on complexity or keywords.'
             : 'Detected planning, broad analysis, or a high-complexity request.';
-      } else if (containsAny(prompt, implementationKeywords)) {
+      } else if (containsAny(prompt, IMPLEMENTATION_KEYWORDS)) {
         phase = 'implementation';
         tier = 'medium';
         reasoning =
           'Detected implementation-oriented work with bounded execution scope.';
       } else if (
-        containsAny(prompt, lookupKeywords) &&
+        containsAny(prompt, LOOKUP_KEYWORDS) &&
         wordCount <= 24 &&
         toolResultCount === 0
       ) {
@@ -567,8 +615,13 @@ export const runNativeClassifier = async (
   if (!modelRegistry.classify) return undefined;
   const { signal, sessionId, userMessage } =
     normalizeClassifierCallOptions(signalOrOptions);
+  if (signal?.aborted) return undefined;
+
+  const promptText = getLastUserText(context, userMessage);
+  const rawUserImages = extractLastUserImages(context, userMessage);
 
   let classifierModel: ClassifierModel<ClassifierApi> | undefined;
+  let fallbackClassifierModel: ClassifierModel<ClassifierApi> | undefined;
   if (classifierModelRef === 'auto') {
     if (!modelRegistry.getAvailableOfType) return undefined;
     const available = await modelRegistry.getAvailableOfType(
@@ -576,7 +629,18 @@ export const runNativeClassifier = async (
       undefined,
       signal ? { signal } : undefined,
     );
-    classifierModel = available[0];
+    if (signal?.aborted) return undefined;
+    classifierModel =
+      (rawUserImages.length > 0
+        ? available.find(
+            (m) => selectClassifierImages(m, rawUserImages).length > 0,
+          )
+        : undefined) ?? available[0];
+    if (classifierModel) {
+      fallbackClassifierModel = available.find(
+        (m) => m.provider !== classifierModel!.provider,
+      );
+    }
   } else {
     if (!modelRegistry.findOfType) return undefined;
     const { provider, modelId } = parseCanonicalModelRef(classifierModelRef);
@@ -585,12 +649,7 @@ export const runNativeClassifier = async (
 
   if (!classifierModel) return undefined;
 
-  const promptText = getLastUserText(context, userMessage);
   const historyText = getRecentConversationText(context, 4);
-  const userImages = selectClassifierImages(
-    classifierModel,
-    extractLastUserImages(context, userMessage),
-  );
 
   const baseContext: ClassifierContext = {
     state: {
@@ -617,27 +676,47 @@ export const runNativeClassifier = async (
           ...(sessionId ? { sessionId } : {}),
         }
       : undefined;
-  let result = await modelRegistry.classify(
-    classifierModel,
-    userImages.length > 0
-      ? { ...baseContext, images: userImages }
-      : baseContext,
-    options,
-  );
-  let totalCost = result.usage?.cost?.total ?? 0;
 
-  // Retry text-only if image classification failed (e.g. experimental endpoint or proxy rejection)
-  if (
-    result.stopReason === 'error' &&
-    userImages.length > 0 &&
-    promptText.length > 0
-  ) {
-    result = await modelRegistry.classify(
-      classifierModel,
-      baseContext,
+  let totalCost = 0;
+  const classifyWithModel = async (
+    candidate: ClassifierModel<ClassifierApi>,
+  ) => {
+    const candidateImages = selectClassifierImages(candidate, rawUserImages);
+    let candidateResult = await modelRegistry.classify!(
+      candidate,
+      candidateImages.length > 0
+        ? { ...baseContext, images: candidateImages }
+        : baseContext,
       options,
     );
-    totalCost += result.usage?.cost?.total ?? 0;
+    totalCost += candidateResult.usage?.cost?.total ?? 0;
+
+    // Retry text-only if image classification failed (e.g. experimental endpoint or proxy rejection)
+    if (
+      candidateResult.stopReason === 'error' &&
+      !signal?.aborted &&
+      candidateImages.length > 0 &&
+      promptText.length > 0
+    ) {
+      candidateResult = await modelRegistry.classify!(
+        candidate,
+        baseContext,
+        options,
+      );
+      totalCost += candidateResult.usage?.cost?.total ?? 0;
+    }
+    return candidateResult;
+  };
+
+  let activeClassifier = classifierModel;
+  let result = await classifyWithModel(activeClassifier);
+  if (
+    result.stopReason === 'error' &&
+    !signal?.aborted &&
+    fallbackClassifierModel
+  ) {
+    activeClassifier = fallbackClassifierModel;
+    result = await classifyWithModel(activeClassifier);
   }
 
   if (result.stopReason !== 'stop') return undefined;
@@ -677,7 +756,7 @@ export const runNativeClassifier = async (
 
   return {
     tier: selectedTier,
-    reasoning: `${classifierModel.provider}/${classifierModel.id} selected ${selectedTier}${probSuffix}${biasSuffix}.`,
+    reasoning: `${activeClassifier.provider}/${activeClassifier.id} selected ${selectedTier}${probSuffix}${biasSuffix}.`,
     ...(totalCost > 0 ? { cost: totalCost } : {}),
   };
 };
@@ -693,6 +772,7 @@ export const runClassifier = async (
 ): Promise<ClassifierDecisionResult | undefined> => {
   try {
     const callOptions = normalizeClassifierCallOptions(signalOrOptions);
+    if (callOptions.signal?.aborted) return undefined;
     // 1. Prefer Pi's native decision/classifier models (Jev, Radius, Copilot GPT-6 Luna Decisions & Microsoft Decision, Clef, OpenAI GPT-6 Luna, llama.cpp classifiers)
     const nativeResult = await runNativeClassifier(
       classifierModelRef,
@@ -703,7 +783,9 @@ export const runClassifier = async (
       callOptions,
     );
     if (nativeResult) return nativeResult;
-    if (classifierModelRef === 'auto') return undefined;
+    if (classifierModelRef === 'auto' || callOptions.signal?.aborted) {
+      return undefined;
+    }
 
     // 2. Fall back to prompt-based classification on a chat LLM
     if (!modelRegistry.streamSimple) return undefined;
@@ -761,19 +843,33 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
     }
 
     const lines = fullText.trim().split('\n');
-    const tierLine = lines.find((l) => l.toLowerCase().startsWith('tier:'));
+    const tierLine = lines.find((l) =>
+      l.replace(/[*_`]/g, '').trimStart().toLowerCase().startsWith('tier:'),
+    );
     const reasoningLine = lines.find((l) =>
-      l.toLowerCase().startsWith('reasoning:'),
+      l
+        .replace(/[*_`]/g, '')
+        .trimStart()
+        .toLowerCase()
+        .startsWith('reasoning:'),
     );
 
     if (tierLine) {
-      const tierValue = tierLine.split(':')[1].trim().toLowerCase();
+      const tierColonIdx = tierLine.indexOf(':');
+      const tierValue = tierLine
+        .slice(tierColonIdx + 1)
+        .replace(/[*_`]/g, '')
+        .trim()
+        .toLowerCase();
       if (isRouterTier(tierValue)) {
+        const reasoningColonIdx = reasoningLine?.indexOf(':') ?? -1;
+        const parsedReasoning =
+          reasoningLine && reasoningColonIdx !== -1
+            ? reasoningLine.slice(reasoningColonIdx + 1).trim()
+            : '';
         return {
           tier: tierValue,
-          reasoning: reasoningLine
-            ? reasoningLine.split(':')[1].trim()
-            : 'Classifier decision.',
+          reasoning: parsedReasoning || 'Classifier decision.',
           ...(typeof streamCost === 'number' && streamCost > 0
             ? { cost: streamCost }
             : {}),

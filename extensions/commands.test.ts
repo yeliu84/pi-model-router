@@ -1350,7 +1350,29 @@ describe('commands.ts', () => {
       await cmd.handler('pin', ctx);
       expect(state.pinnedTierByProfile.balanced).toBeUndefined();
 
-      // 3. /router status displays active model cooldowns and syncs trailing usage
+      // 3. /router fix without args -> opens interactive tier picker with '(last routed)' label
+      selectMock.mockResolvedValueOnce('high');
+      await cmd.handler('fix', ctx);
+      expect(selectMock).toHaveBeenCalledWith(
+        'Fix router/balanced decision',
+        ['high', 'medium (last routed)', 'low'],
+        { blockedKind: 'question' },
+      );
+      expect(state.pinnedTierByProfile.balanced).toBe('high');
+
+      // Cancelling /router fix picker leaves state unchanged; missing lastDecision warns immediately
+      selectMock.mockResolvedValueOnce(undefined);
+      await cmd.handler('fix', ctx);
+      expect(state.pinnedTierByProfile.balanced).toBe('high');
+
+      state.lastDecision = undefined;
+      await cmd.handler('fix', ctx);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        'No recent routing decision to fix.',
+        'warning',
+      );
+
+      // 4. /router status displays active model cooldowns and syncs trailing usage
       const syncTrailingUsage = vi.fn();
       const stateWithCooldowns = {
         ...state,

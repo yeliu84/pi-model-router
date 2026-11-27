@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import type { AutocompleteItem } from '@earendil-works/pi-tui';
+import type { ExtensionUIDialogOptions } from '@earendil-works/pi-coding-agent';
 import { registerCommands } from './commands';
 import type {
   RouterConfig,
@@ -8,6 +9,7 @@ import type {
   RouterPinByProfile,
   RouterThinkingByProfile,
   RouterCommandContext,
+  ModelCooldownEntry,
 } from './types';
 
 interface RegisteredRouterCommand {
@@ -1287,6 +1289,86 @@ describe('commands.ts', () => {
       expect(ctx.ui.notify).toHaveBeenCalledWith(
         'Usage: /router help (no arguments)',
         'error',
+      );
+    });
+
+    it('should open interactive select dialogs with blockedKind="question" for /router profile and /router pin when hasUI is true', async () => {
+      const pi = buildMockPi();
+      const state = buildDefaultState();
+      const actions = buildMockActions();
+      const selectMock =
+        vi.fn<
+          (
+            title: string,
+            options: string[],
+            opts?: ExtensionUIDialogOptions,
+          ) => Promise<string | undefined>
+        >();
+      const ctx: RouterCommandContext = {
+        ...buildMockCtx(),
+        hasUI: true,
+        ui: {
+          ...buildMockCtx().ui,
+          select: selectMock,
+        },
+      };
+
+      registerCommands(pi, state, actions);
+      const cmd = pi.getRegisteredCommand();
+
+      // 1. /router profile -> selects 'balanced (active)' (maps back to 'balanced') and handles Escape cancel
+      selectMock.mockResolvedValueOnce('balanced (active)');
+      await cmd.handler('profile', ctx);
+      expect(selectMock).toHaveBeenCalledWith(
+        'Select router profile',
+        ['balanced (active)', 'cheap'],
+        { blockedKind: 'question' },
+      );
+      expect(actions.switchToRouterProfile).toHaveBeenCalledWith(
+        'balanced',
+        ctx,
+      );
+
+      actions.switchToRouterProfile.mockClear();
+      (ctx.ui.notify as ReturnType<typeof vi.fn>).mockClear();
+      selectMock.mockResolvedValueOnce(undefined);
+      await cmd.handler('profile', ctx);
+      expect(actions.switchToRouterProfile).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).not.toHaveBeenCalled();
+
+      // 2. /router pin -> selects 'high', then 'auto' via '(current)' label
+      selectMock.mockResolvedValueOnce('high');
+      await cmd.handler('pin', ctx);
+      expect(selectMock).toHaveBeenCalledWith(
+        'Pin router/balanced tier',
+        ['auto (current)', 'high', 'medium', 'low'],
+        { blockedKind: 'question' },
+      );
+      expect(state.pinnedTierByProfile.balanced).toBe('high');
+
+      selectMock.mockResolvedValueOnce('auto');
+      await cmd.handler('pin', ctx);
+      expect(state.pinnedTierByProfile.balanced).toBeUndefined();
+
+      // 3. /router status displays active model cooldowns and syncs trailing usage
+      const syncTrailingUsage = vi.fn();
+      const stateWithCooldowns = {
+        ...state,
+        modelCooldowns: new Map<string, ModelCooldownEntry>([
+          ['openai/gpt-6.2-sol', { until: Date.now() + 19_500, status: 429 }],
+        ]),
+      };
+      registerCommands(pi, stateWithCooldowns, {
+        ...actions,
+        syncTrailingUsage,
+      });
+      const cmdWithCooldowns = pi.getRegisteredCommand();
+      const statusCtx = buildMockCtx();
+      await cmdWithCooldowns.handler('status', statusCtx);
+      expect(syncTrailingUsage).toHaveBeenCalledWith(statusCtx);
+      expect(statusCtx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining('Model cooldowns: openai/gpt-6.2-sol'),
+        'info',
       );
     });
   });

@@ -3,6 +3,9 @@ import {
   registerRouterProvider,
   extractUncountedMessageCost,
   markMessageCostCounted,
+  parseRetryAfterMs,
+  applyProviderResponseCooldown,
+  getActiveCooldownRemainingMs,
   type RouterProviderState,
   type RouterProviderActions,
 } from './provider';
@@ -14,6 +17,8 @@ import type {
   RouterVirtualModelDefinition,
   VirtualRouterState,
   ModelRouteRequest,
+  ModelCooldownEntry,
+  CustomSessionEntry,
 } from './types';
 
 const createTestModel = (overrides: Partial<Model<Api>> = {}): Model<Api> => ({
@@ -56,6 +61,10 @@ const createAssistantMsg = (text: string, totalCost = 0): AssistantMessage => ({
 
 interface TestExtensionContext {
   modelRegistry?: RouterModelRegistry;
+  sessionManager?: {
+    getBranch: () => readonly CustomSessionEntry[];
+    getSessionId?: () => string;
+  };
 }
 
 interface TestProviderState extends RouterProviderState<TestExtensionContext> {
@@ -965,6 +974,359 @@ describe('provider.ts (virtual models)', () => {
         mockState.lastExtensionContext!,
       );
       expect(cont2.state).toBe(cont1.state);
+    });
+
+    it('should omit "image" from virtual model input when all configured tier and fallback models are text-only', () => {
+      mockState.currentModelRegistry = {
+        find: (provider: string, modelId: string) =>
+          createTestModel({
+            provider,
+            id: modelId,
+            input: ['text'],
+            reasoning: true,
+          }),
+        hasConfiguredAuth: () => true,
+      };
+      registerRouterProvider(mockPi, mockState, mockActions);
+      expect(registeredVirtualModels.get('router/balanced')!.input).toEqual([
+        'text',
+      ]);
+
+      // Once at least one fallback or tier supports image, virtual model re-registers with ['text', 'image']
+      mockState.currentModelRegistry = {
+        find: (provider: string, modelId: string) =>
+          createTestModel({
+            provider,
+            id: modelId,
+            input:
+              modelId === 'gemini-1.5-flash' ? ['text', 'image'] : ['text'],
+            reasoning: true,
+          }),
+        hasConfiguredAuth: () => true,
+      };
+      registerRouterProvider(mockPi, mockState, mockActions);
+      expect(registeredVirtualModels.get('router/balanced')!.input).toEqual([
+        'text',
+        'image',
+      ]);
+    });
+
+    it('should fall down to a lower vision-capable tier when high tier is text-only and an image is attached', async () => {
+      mockState.currentModelRegistry!.find = (
+        provider: string,
+        modelId: string,
+      ) =>
+        createTestModel({
+          provider,
+          id: modelId,
+          input: modelId === 'gpt-4o-mini' ? ['text', 'image'] : ['text'],
+          reasoning: true,
+        });
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+      mockState.pinnedTierByProfile['balanced'] = 'high';
+
+      const route = await vm.route(
+        buildRequest({
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'image', mimeType: 'image/png', data: 'png' }],
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(route.model.id).toBe('gpt-4o-mini');
+      expect(mockState.lastDecision!.tier).toBe('medium');
+    });
+
+    it('should preserve active primary model on context-overflow or length recovery retries when compacted history fits', async () => {
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      mockState.pinnedTierByProfile['balanced'] = 'medium';
+      mockState.lastDecision = {
+        profile: 'balanced',
+        tier: 'medium',
+        phase: 'implementation',
+        targetProvider: 'openai',
+        targetModelId: 'gpt-4o-mini',
+        targetLabel: 'openai/gpt-4o-mini',
+        thinking: 'medium',
+        reasoning: 'Pinned medium',
+        timestamp: Date.now(),
+      };
+
+      const failedModel = createTestModel({
+        provider: 'openai',
+        id: 'gpt-4o-mini',
+        contextWindow: 128000,
+      });
+      const overflowFailedMsg: AssistantMessage = {
+        ...createAssistantMsg('', 0),
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        stopReason: 'error',
+        errorMessage:
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens. This exceeds the context window.",
+      };
+
+      const compactedRetry = await vm.route(
+        buildRequest({
+          reason: 'retry',
+          messages: [
+            {
+              role: 'user',
+              content:
+                'The conversation history before this point was compacted into the following summary:\n\n<summary>\nShort summary\n</summary>',
+              timestamp: Date.now(),
+            },
+            { role: 'user', content: 'continue', timestamp: Date.now() },
+          ],
+          failed: {
+            model: failedModel,
+            thinkingLevel: 'medium',
+            message: overflowFailedMsg,
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(compactedRetry.model.provider).toBe('openai');
+      expect(compactedRetry.model.id).toBe('gpt-4o-mini');
+      expect(mockState.lastDecision?.isFallback).toBeUndefined();
+      expect(mockState.lastDecision?.reasoning).toContain(
+        'Retrying openai/gpt-4o-mini after context compaction recovery.',
+      );
+
+      // Conversely, if messages STILL exceed failedModel.contextWindow, rotate to the larger-window fallback
+      const tinyFailedModel = createTestModel({
+        provider: 'openai',
+        id: 'gpt-4o-mini',
+        contextWindow: 100,
+      });
+      const uncompactedGiantRetry = await vm.route(
+        buildRequest({
+          reason: 'retry',
+          messages: [
+            {
+              role: 'user',
+              content: 'x'.repeat(2000),
+              timestamp: Date.now(),
+            },
+          ],
+          failed: {
+            model: tinyFailedModel,
+            thinkingLevel: 'medium',
+            message: overflowFailedMsg,
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+
+      expect(uncompactedGiantRetry.model.provider).toBe('google');
+      expect(uncompactedGiantRetry.model.id).toBe('gemini-1.5-flash');
+      expect(mockState.lastDecision?.isFallback).toBe(true);
+    });
+
+    it('should route around rate-limited models during active Retry-After cooldowns on user and direct requests', async () => {
+      mockState.modelCooldowns = new Map<string, ModelCooldownEntry>([
+        ['openai/gpt-4o-mini', { until: Date.now() + 45_000, status: 429 }],
+      ]);
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      // Direct request skips cooled-down gpt-4o-mini in favor of gemini-1.5-flash
+      const directRoute = await vm.route(
+        buildRequest({ reason: 'direct' }),
+        mockState.lastExtensionContext!,
+      );
+      expect(directRoute.model.provider).toBe('google');
+      expect(directRoute.model.id).toBe('gemini-1.5-flash');
+
+      // User request skips cooled-down gpt-4o-mini and records cooldown fallback reason
+      const userRoute = await vm.route(
+        buildRequest({
+          messages: [
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(userRoute.model.provider).toBe('google');
+      expect(userRoute.model.id).toBe('gemini-1.5-flash');
+      expect(mockState.lastDecision?.isFallback).toBe(true);
+      expect(mockState.lastDecision?.reasoning).toContain(
+        'while openai/gpt-4o-mini is cooling down',
+      );
+
+      // Tool-result continuations must NOT switch models mid-turn due to a transient cooldown
+      mockState.currentModelRegistry!.hasConfiguredAuth = () => true;
+      const continuationRoute = await vm.route(
+        buildRequest({
+          reason: 'continuation',
+          state: {
+            phase: 'implementation',
+            tier: 'medium',
+            lastDecision: {
+              profile: 'balanced',
+              tier: 'medium',
+              phase: 'implementation',
+              targetProvider: 'openai',
+              targetModelId: 'gpt-4o-mini',
+              targetLabel: 'openai/gpt-4o-mini',
+              thinking: 'medium',
+              reasoning: 'Initial turn',
+              timestamp: Date.now(),
+            },
+          },
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(continuationRoute.model.id).toBe('gpt-4o-mini');
+      expect(mockState.lastDecision?.isFallback).toBeUndefined();
+
+      // When fallback lacks credentials, still uses primary as last resort without marking isFallback
+      mockState.currentModelRegistry!.hasConfiguredAuth = (model: Model<Api>) =>
+        model.provider !== 'google';
+      const lastResortRoute = await vm.route(
+        buildRequest({
+          messages: [
+            { role: 'user', content: 'fix this bug', timestamp: Date.now() },
+          ],
+        }),
+        mockState.lastExtensionContext!,
+      );
+      expect(lastResortRoute.model.id).toBe('gpt-4o-mini');
+      expect(mockState.lastDecision?.isFallback).toBeUndefined();
+    });
+
+    it('should extract authoritative user prompt from sessionManager branch when custom_message follows user prompt', async () => {
+      mockState.currentConfig.profiles.balanced.low = {
+        model: 'openai/gpt-4o-nano',
+        thinking: 'low',
+      };
+      const realUserMsg = {
+        role: 'user' as const,
+        content: 'fast summary',
+        timestamp: Date.now(),
+      };
+      const ctxWithBranch: TestExtensionContext = {
+        modelRegistry: mockState.currentModelRegistry,
+        sessionManager: {
+          getSessionId: () => 'sess_abc',
+          getBranch: () => [
+            { type: 'message', message: realUserMsg },
+            {
+              type: 'custom_message',
+              customType: 'plan-mode-context',
+            },
+          ],
+        },
+      };
+
+      registerRouterProvider(mockPi, mockState, mockActions);
+      const vm = registeredVirtualModels.get('router/balanced')!;
+
+      const route = await vm.route(
+        buildRequest({
+          messages: [
+            realUserMsg,
+            {
+              role: 'user',
+              content:
+                'think hard step by step\narchitecture\ndesign\ntradeoff\nmultiline injected instructions',
+              timestamp: Date.now(),
+            },
+          ],
+        }),
+        ctxWithBranch,
+      );
+
+      expect(route.model.id).toBe('gpt-4o-nano');
+      expect(mockState.lastDecision?.tier).toBe('low');
+    });
+  });
+
+  describe('rate-limit cooldown helpers', () => {
+    it('should parse Retry-After seconds, milliseconds, and HTTP dates and update/clear model cooldowns', () => {
+      const now = 1_700_000_000_000;
+      expect(parseRetryAfterMs({ 'Retry-After': '30' }, now)).toBe(30_000);
+      expect(parseRetryAfterMs({ 'retry-after-ms': '2500' }, now)).toBe(2_500);
+      expect(
+        parseRetryAfterMs(
+          { 'retry-after': new Date(now + 12_000).toUTCString() },
+          now,
+        ),
+      ).toBe(12_000);
+      // ISO-8601 date strings must parse as dates rather than leading year via parseFloat
+      expect(
+        parseRetryAfterMs(
+          { 'retry-after': new Date(now + 18_000).toISOString() },
+          now,
+        ),
+      ).toBe(18_000);
+      expect(parseRetryAfterMs({ 'retry-after': '999999' }, now)).toBe(900_000);
+
+      const cooldowns = new Map<string, ModelCooldownEntry>();
+      expect(
+        applyProviderResponseCooldown(
+          cooldowns,
+          'openai/gpt-6.2-sol',
+          429,
+          { 'retry-after': '25' },
+          now,
+        ),
+      ).toBe(true);
+      expect(
+        getActiveCooldownRemainingMs(cooldowns, 'openai/gpt-6.2-sol', now),
+      ).toBe(25_000);
+
+      // Headerless 429 still applies default 15s cooldown, while headerless 503 does not
+      expect(
+        applyProviderResponseCooldown(
+          cooldowns,
+          'google/gemini-4-argon',
+          429,
+          {},
+          now,
+        ),
+      ).toBe(true);
+      expect(
+        getActiveCooldownRemainingMs(cooldowns, 'google/gemini-4-argon', now),
+      ).toBe(15_000);
+      expect(
+        applyProviderResponseCooldown(
+          cooldowns,
+          'anthropic/claude-sonnet-5-5',
+          503,
+          {},
+          now,
+        ),
+      ).toBe(false);
+
+      // Subsequent 200 OK clears cooldown immediately
+      expect(
+        applyProviderResponseCooldown(
+          cooldowns,
+          'openai/gpt-6.2-sol',
+          200,
+          {},
+          now + 1_000,
+        ),
+      ).toBe(true);
+      expect(
+        getActiveCooldownRemainingMs(
+          cooldowns,
+          'openai/gpt-6.2-sol',
+          now + 1_000,
+        ),
+      ).toBe(0);
     });
   });
 

@@ -2,6 +2,21 @@
 
 All notable changes to `@yeliu84/pi-model-router` are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Rate-limit cooldown tracking via Pi `1.6.1`'s `after_provider_response` hook (reading HTTP `429` / `503` / `529` status and `Retry-After` / `retry-after-ms` headers across providers) to automatically route around cooling-down models and surface active cooldowns in `/router status` and the status widget.
+- Interactive `ctx.ui.select()` pickers (with Pi `1.6.1`'s `blockedKind: 'question'` program status) when running `/router profile` or `/router pin` without arguments in UI-capable sessions.
+- Support and documentation for Pi `1.6.1`'s new native decision models (`github-copilot/gpt-6-luna-decisions` with image input and Radius `pi-decision` models with `sessionId` correlation), plus `disableContinuation: true` on chat-LLM classifier calls to avoid mutating Anthropic message threads.
+
+### Changed
+
+- Preserved the active primary model on post-compaction context-overflow and truncated-length recovery retries (`isContextOverflow` / `stopReason === 'length'`) when the compacted conversation fits, rotating to larger-context fallbacks only when the request still exceeds the model's context window.
+- Resolved projected user prompts and attached images across `ctx.sessionManager.getBranch()` (preserving `context_edit` / `context` redactions while skipping trailing `custom_message` / `!bash` injections and synthetic compaction/branch summary wrappers) so extension-injected context does not skew heuristic or classifier routing.
+- Dynamically resolved virtual model `input` modalities (`['text']` vs `['text', 'image']`) from configured tier and fallback models, and added downward vision-tier fallback when higher tiers are text-only.
+- Updated peer-tested Pi packages to `1.6.1`, `oxfmt` to `^0.80.0`, and `vitest` to `^5.1.2`.
+
 ## [0.5.6] - 2026-11-22
 
 ### Changed

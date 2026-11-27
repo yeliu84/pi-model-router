@@ -5,6 +5,7 @@ import {
   type Context,
   type ImageContent,
   type Message,
+  type PiDecisionOptions,
 } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
@@ -16,10 +17,13 @@ import type {
   RouterThinkingByTier,
   RouterModelRegistry,
   ClassifierDecisionResult,
+  ClassifierCallOptions,
+  CustomSessionEntry,
 } from './types';
 import {
   parseCanonicalModelRef,
   findModelByRef,
+  isObjectRecord,
   isRouterTier,
   ROUTER_TIERS,
 } from './config';
@@ -30,6 +34,11 @@ const TIER_CRITERIA: Record<RouterTier, string> = {
     'Implementation of a known plan, multi-file edits, normal coding work, focused debugging, or tests/fixes',
   low: 'Summaries, changelogs, formatting, quick explanations, small bounded transforms, or simple read-only lookups',
 };
+
+const SYNTHETIC_SUMMARY_PREFIXES = [
+  'The conversation history before this point was compacted into the following summary:',
+  'The following is a summary of a branch that this conversation came back from:',
+] as const;
 
 export const extractTextFromContent = (
   content: string | Message['content'],
@@ -49,8 +58,79 @@ export const extractTextFromContent = (
     .join('\n');
 };
 
-export const getLastUserText = (context: Context): string => {
-  const lastUser = context.messages.findLast((m) => m.role === 'user');
+export const isSyntheticSummaryMessage = (message: Message): boolean => {
+  if (message.role !== 'user') return false;
+  const leadingText =
+    typeof message.content === 'string'
+      ? message.content
+      : message.content.find((part) => part.type === 'text')?.text;
+  if (!leadingText) return false;
+  const trimmed = leadingText.trimStart();
+  return SYNTHETIC_SUMMARY_PREFIXES.some((prefix) =>
+    trimmed.startsWith(prefix),
+  );
+};
+
+const countTrailingConvertedUserEntries = (
+  entries: readonly CustomSessionEntry[] | undefined,
+): number => {
+  if (!entries) return 0;
+  let count = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type === 'custom_message') {
+      count++;
+      continue;
+    }
+    if (entry.type !== 'message' || !isObjectRecord(entry.message)) {
+      continue;
+    }
+    if (
+      entry.message.role === 'assistant' &&
+      entry.message.stopReason !== 'error'
+    ) {
+      return 0;
+    }
+    if (
+      entry.message.role === 'bashExecution' &&
+      !entry.message.excludeFromContext
+    ) {
+      count++;
+      continue;
+    }
+    if (entry.message.role === 'user') {
+      return count;
+    }
+  }
+  return 0;
+};
+
+export const resolveTurnUserMessage = (
+  context: Context,
+  entries?: readonly CustomSessionEntry[],
+): Message | undefined => {
+  const trailingConverted = countTrailingConvertedUserEntries(entries);
+  if (trailingConverted > 0) {
+    const lastAssistantIdx = context.messages.findLastIndex(
+      (m) => m.role === 'assistant',
+    );
+    const turnUsers = context.messages
+      .slice(lastAssistantIdx + 1)
+      .filter((m) => m.role === 'user' && !isSyntheticSummaryMessage(m));
+    if (turnUsers.length > 0) {
+      return turnUsers[Math.max(0, turnUsers.length - 1 - trailingConverted)];
+    }
+  }
+  return context.messages.findLast(
+    (m) => m.role === 'user' && !isSyntheticSummaryMessage(m),
+  );
+};
+
+export const getLastUserText = (
+  context: Context,
+  userMessage?: Message,
+): string => {
+  const lastUser = userMessage ?? resolveTurnUserMessage(context);
   return lastUser ? extractTextFromContent(lastUser.content).trim() : '';
 };
 
@@ -58,18 +138,26 @@ export const getRecentConversationText = (
   context: Context,
   limit = 6,
 ): string => {
-  return context.messages
-    .filter((message) => message.role !== 'system')
-    .slice(-limit)
-    .map((message) => extractTextFromContent(message.content).trim())
-    .filter(Boolean)
-    .join('\n')
-    .toLowerCase();
+  const recent: string[] = [];
+  let matched = 0;
+  for (let i = context.messages.length - 1; i >= 0 && matched < limit; i--) {
+    const message = context.messages[i];
+    if (message.role === 'system' || isSyntheticSummaryMessage(message)) {
+      continue;
+    }
+    matched++;
+    const text = extractTextFromContent(message.content).trim();
+    if (text) recent.push(text.toLowerCase());
+  }
+  return recent.reverse().join('\n');
 };
 
 export const countToolResults = (context: Context): number => {
-  return context.messages.filter((message) => message.role === 'toolResult')
-    .length;
+  let count = 0;
+  for (const message of context.messages) {
+    if (message.role === 'toolResult') count++;
+  }
+  return count;
 };
 
 export const countWords = (text: string): number => {
@@ -84,8 +172,11 @@ export const hasImageAttachment = (context: Context): boolean => {
   );
 };
 
-export const extractLastUserImages = (context: Context): ImageContent[] => {
-  const lastUser = context.messages.findLast((m) => m.role === 'user');
+export const extractLastUserImages = (
+  context: Context,
+  userMessage?: Message,
+): ImageContent[] => {
+  const lastUser = userMessage ?? resolveTurnUserMessage(context);
   return Array.isArray(lastUser?.content)
     ? lastUser.content.filter(
         (part): part is ImageContent => part.type === 'image',
@@ -170,8 +261,9 @@ export const decideRouting = (
   phaseBias = 0.5,
   rules?: RoutingRule[],
   isBudgetExceeded = false,
+  userMessage?: Message,
 ): RoutingDecision => {
-  const prompt = getLastUserText(context).toLowerCase();
+  const prompt = getLastUserText(context, userMessage).toLowerCase();
   const recentConversation = getRecentConversationText(context);
   const toolResultCount = countToolResults(context);
   const wordCount = countWords(prompt);
@@ -454,15 +546,27 @@ export const selectClassifierImages = (
     .slice(0, MAX_CLASSIFIER_IMAGES);
 };
 
+const normalizeClassifierCallOptions = (
+  signalOrOptions?: AbortSignal | ClassifierCallOptions,
+): ClassifierCallOptions => {
+  if (!signalOrOptions) return {};
+  if ('aborted' in signalOrOptions) {
+    return { signal: signalOrOptions };
+  }
+  return signalOrOptions;
+};
+
 export const runNativeClassifier = async (
   classifierModelRef: string,
   modelRegistry: RouterModelRegistry,
   context: Context,
   currentPhase?: RouterPhase,
   phaseBias = 0.5,
-  signal?: AbortSignal,
+  signalOrOptions?: AbortSignal | ClassifierCallOptions,
 ): Promise<ClassifierDecisionResult | undefined> => {
   if (!modelRegistry.classify) return undefined;
+  const { signal, sessionId, userMessage } =
+    normalizeClassifierCallOptions(signalOrOptions);
 
   let classifierModel: ClassifierModel<ClassifierApi> | undefined;
   if (classifierModelRef === 'auto') {
@@ -481,11 +585,11 @@ export const runNativeClassifier = async (
 
   if (!classifierModel) return undefined;
 
-  const promptText = getLastUserText(context);
+  const promptText = getLastUserText(context, userMessage);
   const historyText = getRecentConversationText(context, 4);
   const userImages = selectClassifierImages(
     classifierModel,
-    extractLastUserImages(context),
+    extractLastUserImages(context, userMessage),
   );
 
   const baseContext: ClassifierContext = {
@@ -506,7 +610,13 @@ export const runNativeClassifier = async (
     },
   };
 
-  const options = signal ? { signal } : undefined;
+  const options: PiDecisionOptions | undefined =
+    signal || sessionId
+      ? {
+          ...(signal ? { signal } : {}),
+          ...(sessionId ? { sessionId } : {}),
+        }
+      : undefined;
   let result = await modelRegistry.classify(
     classifierModel,
     userImages.length > 0
@@ -579,17 +689,18 @@ export const runClassifier = async (
   currentPhase?: RouterPhase,
   thinking?: ThinkingLevel,
   phaseBias = 0.5,
-  signal?: AbortSignal,
+  signalOrOptions?: AbortSignal | ClassifierCallOptions,
 ): Promise<ClassifierDecisionResult | undefined> => {
   try {
-    // 1. Prefer Pi's native classifier models (Jev, Microsoft Decision, Clef, GPT-6 Luna, llama.cpp classifiers)
+    const callOptions = normalizeClassifierCallOptions(signalOrOptions);
+    // 1. Prefer Pi's native decision/classifier models (Jev, Radius, Copilot GPT-6 Luna Decisions & Microsoft Decision, Clef, OpenAI GPT-6 Luna, llama.cpp classifiers)
     const nativeResult = await runNativeClassifier(
       classifierModelRef,
       modelRegistry,
       context,
       currentPhase,
       phaseBias,
-      signal,
+      callOptions,
     );
     if (nativeResult) return nativeResult;
     if (classifierModelRef === 'auto') return undefined;
@@ -599,7 +710,7 @@ export const runClassifier = async (
     const model = findModelByRef(classifierModelRef, modelRegistry);
     if (!model) return undefined;
 
-    const promptText = getLastUserText(context);
+    const promptText = getLastUserText(context, callOptions.userMessage);
     const historyText = getRecentConversationText(context, 4);
 
     const classifierPrompt = `You are a model router classifier. Your job is to categorize the user's latest request into one of three tiers: "high", "medium", or "low".
@@ -633,8 +744,10 @@ ${currentPhase === 'implementation' ? 'Consider that the conversation is current
       model.reasoning && thinking && thinking !== 'off' ? thinking : undefined;
 
     const stream = modelRegistry.streamSimple(model, classifierContext, {
+      disableContinuation: true,
       ...(reasoningOption ? { reasoning: reasoningOption } : {}),
-      ...(signal ? { signal } : {}),
+      ...(callOptions.signal ? { signal: callOptions.signal } : {}),
+      ...(callOptions.sessionId ? { sessionId: callOptions.sessionId } : {}),
     });
 
     let fullText = '';

@@ -16,6 +16,8 @@ import {
   runClassifier,
   runNativeClassifier,
   selectClassifierImages,
+  isSyntheticSummaryMessage,
+  resolveTurnUserMessage,
 } from './routing';
 import {
   createAssistantMessageEventStream,
@@ -617,7 +619,10 @@ describe('routing.ts', () => {
       expect(registryStreamSimple).toHaveBeenCalledWith(
         expect.objectContaining({ provider: 'openai', id: 'gpt-4o' }),
         expect.anything(),
-        expect.objectContaining({ reasoning: 'high' }),
+        expect.objectContaining({
+          reasoning: 'high',
+          disableContinuation: true,
+        }),
       );
     });
 
@@ -1009,6 +1014,215 @@ describe('routing.ts', () => {
       // Text-only classifier must not receive images in ClassifierContext
       expect(classifyFn).toHaveBeenCalledTimes(1);
       expect(classifyFn.mock.calls[0][1]).not.toHaveProperty('images');
+    });
+
+    it('should classify with Pi 1.6.1 GitHub Copilot gpt-6-luna-decisions (with images) and Radius pi-decision (with sessionId)', async () => {
+      const copilotLuna: ClassifierModel<'openai-decisions'> = {
+        type: 'classifier',
+        id: 'gpt-6-luna-decisions',
+        name: 'GPT-6 Luna Decisions',
+        api: 'openai-decisions',
+        provider: 'github-copilot',
+        baseUrl: 'https://api.individual.githubcopilot.com',
+        input: ['text', 'image'],
+        contextWindow: 922000,
+        cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+      };
+
+      const radiusDecision: ClassifierModel<'pi-decision'> = {
+        type: 'classifier',
+        id: 'decision-fast',
+        name: 'Radius Decision Fast',
+        api: 'pi-decision',
+        provider: 'radius',
+        baseUrl: 'https://radius.pi.dev',
+        input: ['text', 'image'],
+        contextWindow: 131072,
+        cost: { input: 0.05, output: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+
+      const imageCtx: Context = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyze this architecture diagram' },
+              { type: 'image', data: 'webpdata', mimeType: 'image/webp' },
+              { type: 'image', data: 'gifdata', mimeType: 'image/gif' },
+            ],
+            timestamp: Date.now(),
+          },
+        ],
+      };
+
+      const copilotClassifyFn = vi.fn().mockResolvedValue({
+        api: 'openai-decisions',
+        provider: 'github-copilot',
+        model: 'gpt-6-luna-decisions',
+        responseId: 'resp_copilot_1',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'high',
+            probabilities: { high: 0.91, medium: 0.07, low: 0.02 },
+            confidence: 0.86,
+          },
+        },
+      } satisfies ClassifierResult);
+
+      const copilotRes = await runClassifier(
+        'github-copilot/gpt-6-luna-decisions',
+        {
+          ...mockRegistry,
+          findOfType: vi.fn().mockReturnValue(copilotLuna),
+          classify: copilotClassifyFn,
+        },
+        imageCtx,
+      );
+      expect(copilotRes).toEqual({
+        tier: 'high',
+        reasoning:
+          'github-copilot/gpt-6-luna-decisions selected high (p=91%, conf=86%).',
+      });
+      expect(copilotClassifyFn).toHaveBeenCalledWith(
+        copilotLuna,
+        expect.objectContaining({
+          images: [{ type: 'image', data: 'webpdata', mimeType: 'image/webp' }],
+        }),
+        undefined,
+      );
+
+      const radiusClassifyFn = vi.fn().mockResolvedValue({
+        api: 'pi-decision',
+        provider: 'radius',
+        model: 'decision-fast',
+        responseId: 'rad_dec_1',
+        stopReason: 'stop',
+        timestamp: Date.now(),
+        usage: {
+          input: 200,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 200,
+          cost: {
+            input: 0.00001,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0.00001,
+            totalFromProvider: true,
+          },
+        },
+        answers: {
+          tier: {
+            type: 'choice',
+            choice: 'low',
+            probabilities: { high: 0.03, medium: 0.12, low: 0.85 },
+            confidence: 0.78,
+          },
+        },
+      } satisfies ClassifierResult);
+
+      const radiusRes = await runClassifier(
+        'radius/decision-fast',
+        {
+          ...mockRegistry,
+          findOfType: vi.fn().mockReturnValue(radiusDecision),
+          classify: radiusClassifyFn,
+        },
+        imageCtx,
+        'implementation',
+        undefined,
+        0.5,
+        { sessionId: 'sess_radius_123' },
+      );
+      expect(radiusRes).toEqual({
+        tier: 'low',
+        reasoning: 'radius/decision-fast selected low (p=85%, conf=78%).',
+        cost: 0.00001,
+      });
+      expect(radiusClassifyFn).toHaveBeenCalledWith(
+        radiusDecision,
+        expect.objectContaining({
+          images: [{ type: 'image', data: 'webpdata', mimeType: 'image/webp' }],
+        }),
+        { sessionId: 'sess_radius_123' },
+      );
+    });
+
+    it('should ignore synthetic compaction/branch summaries and resolve projected user messages across custom_message and bash injections', () => {
+      const compactionUserMsg: Message = {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: 'The conversation history before this point was compacted into the following summary:\n\n<summary>\nPlan:\n1. Big architecture plan\n</summary>',
+          },
+        ],
+        timestamp: 1,
+      };
+      const rawUnredactedUserMsg: Message = {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'quick typo fix sk-secret-123' },
+          { type: 'image', data: 'realpng', mimeType: 'image/png' },
+        ],
+        timestamp: 2,
+      };
+      const projectedRedactedUserMsg: Message = {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'quick typo fix [REDACTED]' },
+          { type: 'image', data: 'realpng', mimeType: 'image/png' },
+        ],
+        timestamp: 2,
+      };
+      const injectedCustomMsgConvertedToUser: Message = {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '[PLAN MODE ACTIVE]\nArchitecture guidelines:\n1. Think deeply\n2. Analyze tradeoffs\n3. Multi-line instructions\n4. Plan: ...',
+          },
+        ],
+        timestamp: 3,
+      };
+
+      expect(isSyntheticSummaryMessage(compactionUserMsg)).toBe(true);
+      expect(isSyntheticSummaryMessage(projectedRedactedUserMsg)).toBe(false);
+
+      const ctxWithSummariesAndInjection: Context = {
+        messages: [
+          compactionUserMsg,
+          projectedRedactedUserMsg,
+          injectedCustomMsgConvertedToUser,
+        ],
+      };
+
+      // Compaction summary excluded from recent conversation text
+      expect(
+        getRecentConversationText(ctxWithSummariesAndInjection, 6),
+      ).not.toContain('the conversation history before this point');
+
+      // Resolves projected (redacted) message from context.messages rather than raw unredacted branch entry
+      const turnUser = resolveTurnUserMessage(ctxWithSummariesAndInjection, [
+        { type: 'compaction' },
+        { type: 'message', message: rawUnredactedUserMsg },
+        {
+          type: 'custom_message',
+          customType: 'plan-mode-context',
+        },
+      ]);
+      expect(turnUser).toBe(projectedRedactedUserMsg);
+      expect(getLastUserText(ctxWithSummariesAndInjection, turnUser)).toBe(
+        'quick typo fix [REDACTED]',
+      );
+      expect(
+        extractLastUserImages(ctxWithSummariesAndInjection, turnUser),
+      ).toEqual([{ type: 'image', data: 'realpng', mimeType: 'image/png' }]);
     });
   });
 });

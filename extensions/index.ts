@@ -10,12 +10,14 @@ import {
   type RouterThinkingByProfile,
   type RouterTier,
   type CustomSessionEntry,
+  type ModelCooldownEntry,
 } from './types';
 import {
   loadRouterConfig,
   profileNames,
   resolveProfileName,
   applyThinkingOverride,
+  isObjectRecord,
 } from './config';
 import { MAX_DEBUG_HISTORY } from './constants';
 import {
@@ -30,6 +32,7 @@ import {
   markMessageCostCounted,
   extractUncountedMessageCost,
   resetCountedMessageCosts,
+  applyProviderResponseCooldown,
 } from './provider';
 
 const routerExtension = <
@@ -54,6 +57,8 @@ const routerExtension = <
     accumulatedCost: 0,
     lastExtensionContext: undefined as TCtx | undefined,
     lastConfigWarnings: [] as string[],
+    modelCooldowns: new Map<string, ModelCooldownEntry>(),
+    inFlightModelRef: undefined as string | undefined,
   };
   let lastPersistedSnapshot: string | undefined;
   let isInitialized = false;
@@ -119,6 +124,18 @@ const routerExtension = <
     }
   };
 
+  const syncTrailingBranchUsage = (ctx: TCtx) => {
+    const entries = ctx.sessionManager?.getBranch?.();
+    if (!entries) return;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry.type === 'custom' && entry.customType === 'router-state') {
+        break;
+      }
+      recordUsageCost(entry);
+    }
+  };
+
   const persistState = () => {
     const persisted = buildPersistedState(
       state.routerEnabled,
@@ -152,6 +169,10 @@ const routerExtension = <
     recordDebugDecision,
     getThinkingOverride,
     syncPiThinkingLevel,
+    syncTrailingUsage: (ctx: TCtx) => {
+      syncTrailingBranchUsage(ctx);
+      persistState();
+    },
     updateStatus: (ctx: TCtx) =>
       updateStatus(
         ctx,
@@ -164,6 +185,7 @@ const routerExtension = <
         state.accumulatedCost,
         state.widgetEnabled,
         state.currentConfig,
+        state.modelCooldowns,
       ),
     reloadConfig: (ctx?: TCtx, options?: { preserveDebug?: boolean }) => {
       const loaded = loadRouterConfig(state.currentCwd);
@@ -267,6 +289,7 @@ const routerExtension = <
     state.widgetEnabled = false;
     state.debugHistory = [];
     state.accumulatedCost = 0;
+    state.inFlightModelRef = undefined;
     lastPersistedSnapshot = undefined;
     resetCountedMessageCosts();
     state.lastNonRouterModel =
@@ -388,18 +411,6 @@ const routerExtension = <
     }
   };
 
-  const syncTrailingBranchUsage = (ctx: TCtx) => {
-    const entries = ctx.sessionManager?.getBranch?.();
-    if (!entries) return;
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i];
-      if (entry.type === 'custom' && entry.customType === 'router-state') {
-        break;
-      }
-      recordUsageCost(entry);
-    }
-  };
-
   const handleUsageEvent = async (event: unknown, ctx: TCtx) => {
     ensureInitializedFromContext(ctx);
     recordUsageCost(event);
@@ -407,10 +418,21 @@ const routerExtension = <
     actions.updateStatus(ctx);
   };
 
-  pi.on('session_compact', handleUsageEvent);
+  pi.on('session_compact', async (event, ctx) => {
+    state.inFlightModelRef = undefined;
+    await handleUsageEvent(event, ctx);
+  });
+
+  pi.on('session_compact_failed', () => {
+    state.inFlightModelRef = undefined;
+  });
 
   pi.on('turn_start', async (_event, ctx) => {
     ensureInitializedFromContext(ctx);
+    state.inFlightModelRef =
+      ctx.model && ctx.model.provider !== 'router'
+        ? `${ctx.model.provider}/${ctx.model.id}`
+        : undefined;
     syncTrailingBranchUsage(ctx);
     actions.registerRouterProvider();
   });
@@ -438,7 +460,35 @@ const routerExtension = <
     actions.updateStatus(ctx);
   });
 
-  pi.on('turn_end', handleUsageEvent);
+  pi.on('turn_end', async (event, ctx) => {
+    state.inFlightModelRef = undefined;
+    if (
+      isObjectRecord(event) &&
+      isObjectRecord(event.message) &&
+      event.message.role === 'assistant' &&
+      event.message.stopReason !== 'error' &&
+      event.message.stopReason !== 'aborted' &&
+      typeof event.message.provider === 'string' &&
+      typeof event.message.model === 'string'
+    ) {
+      const succeededRef = `${event.message.provider}/${event.message.model}`;
+      state.modelCooldowns.delete(succeededRef);
+    }
+    await handleUsageEvent(event, ctx);
+  });
+
+  pi.on('after_provider_response', (event, ctx) => {
+    ensureInitializedFromContext(ctx);
+    const changed = applyProviderResponseCooldown(
+      state.modelCooldowns,
+      state.inFlightModelRef,
+      event.status,
+      event.headers,
+    );
+    if (changed && state.widgetEnabled) {
+      actions.updateStatus(ctx);
+    }
+  });
 
   pi.on('thinking_level_select', (event, ctx) => {
     ensureInitializedFromContext(ctx);

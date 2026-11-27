@@ -7,6 +7,7 @@ import type {
   RouterTier,
   RouterUIContext,
   RouterModelCapabilityLookup,
+  ModelCooldownEntry,
 } from './types';
 import { getUnsupportedTiers } from './config';
 
@@ -62,6 +63,21 @@ export const formatSessionCost = (
   `$${accumulatedCost.toFixed(4)}` +
   (maxSessionBudget ? ` / $${maxSessionBudget.toFixed(2)}` : '');
 
+export const formatCooldownSummary = (
+  cooldowns: ReadonlyMap<string, ModelCooldownEntry> | undefined,
+  now = Date.now(),
+): string | undefined => {
+  if (!cooldowns || cooldowns.size === 0) return undefined;
+  const entries = [...cooldowns.entries()]
+    .filter(([, entry]) => entry.until > now)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(
+      ([modelRef, entry]) =>
+        `${modelRef} (${Math.ceil((entry.until - now) / 1000)}s)`,
+    );
+  return entries.length > 0 ? entries.join(', ') : undefined;
+};
+
 export const formatUnsupportedThinkingWarning = (
   scope: RouterTier | 'all',
   level: ThinkingLevel,
@@ -102,6 +118,7 @@ export const updateStatus = (
   accumulatedCost: number,
   widgetEnabled: boolean,
   currentConfig: RouterConfig,
+  modelCooldowns?: ReadonlyMap<string, ModelCooldownEntry>,
 ) => {
   const activeRouterProfile = routerEnabled ? selectedProfile : undefined;
   const statusProfile = selectedProfile ?? 'none';
@@ -160,6 +177,10 @@ export const updateStatus = (
   }
   if (Object.keys(pinnedTierByProfile).length > 1) {
     widgetLines.push(`Pins: ${formatPinSummary(pinnedTierByProfile)}`);
+  }
+  const cooldownSummary = formatCooldownSummary(modelCooldowns);
+  if (cooldownSummary) {
+    widgetLines.push(`Cooldowns: ${cooldownSummary}`);
   }
   ctx.ui.setWidget(
     'router',

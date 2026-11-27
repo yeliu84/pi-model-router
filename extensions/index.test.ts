@@ -4,6 +4,7 @@ import type { Api, Model } from '@earendil-works/pi-ai';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type {
   CustomSessionEntry,
+  RouterAfterProviderResponseEvent,
   RouterExtensionAPI,
   RouterModelSelectEvent,
   RouterThinkingLevelSelectEvent,
@@ -80,9 +81,13 @@ const buildMockCtx = () => ({
 type MockCtx = ReturnType<typeof buildMockCtx>;
 
 type FullRouterEvent = RouterModelSelectEvent &
-  RouterThinkingLevelSelectEvent & {
+  RouterThinkingLevelSelectEvent &
+  RouterAfterProviderResponseEvent & {
     message?: {
       role?: string;
+      provider?: string;
+      model?: string;
+      stopReason?: string;
       usage?: { cost?: { total?: number } };
     };
     compactionEntry?: {
@@ -124,6 +129,8 @@ const createMockPi = (eventListeners: Record<string, TriggerHandler[]>) => ({
         {
           model: { provider: 'router', id: 'balanced' },
           level: 'off',
+          status: 200,
+          headers: {},
           ...partialEvent,
         },
         ctx,
@@ -1033,6 +1040,127 @@ describe('index.ts (orchestrator)', () => {
           accumulatedCost: 0,
         }),
       );
+    });
+
+    it('should track rate-limit Retry-After cooldowns via after_provider_response and clear them on 2xx recovery', async () => {
+      routerExtension(mockPi);
+      const mockCtx = buildMockCtx();
+      mockCtx.modelRegistry.find = vi.fn((provider: string, modelId: string) =>
+        createTestModel({ provider, id: modelId }),
+      );
+
+      // Restore session with widget enabled
+      mockCtx.sessionManager.getBranch = () => [
+        {
+          type: 'custom',
+          customType: 'router-state',
+          data: {
+            enabled: true,
+            selectedProfile: 'balanced',
+            widgetEnabled: true,
+            timestamp: Date.now(),
+          },
+        },
+      ];
+      for (const handler of eventListeners['session_start'] || []) {
+        await handler({}, mockCtx);
+      }
+
+      const registeredVm = mockPi.registerVirtualModel.mock.calls.at(-1)?.[0];
+      expect(registeredVm).toBeDefined();
+
+      // Route a planning turn -> dispatches openai/gpt-4o as inFlightModelRef
+      const route = await registeredVm!.route(
+        {
+          model: createTestModel({ provider: 'router', id: 'balanced' }),
+          thinkingLevel: 'high',
+          reason: 'user',
+          messages: [
+            {
+              role: 'user',
+              content: 'plan the architecture deeply',
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        mockCtx,
+      );
+      expect(route.model.provider).toBe('openai');
+      expect(route.model.id).toBe('gpt-4o');
+
+      // Provider responds with HTTP 429 + Retry-After: 60
+      mockCtx.ui.setWidget.mockClear();
+      for (const handler of eventListeners['after_provider_response'] || []) {
+        await handler(
+          { status: 429, headers: { 'retry-after': '60' } },
+          mockCtx,
+        );
+      }
+
+      const cooldownWidget = mockCtx.ui.setWidget.mock.calls.at(-1)?.[1];
+      expect(cooldownWidget).toBeDefined();
+      expect(
+        cooldownWidget!.some((line) =>
+          line.includes('Cooldowns: openai/gpt-4o'),
+        ),
+      ).toBe(true);
+
+      // Provider subsequently succeeds with HTTP 200 -> clears cooldown
+      mockCtx.ui.setWidget.mockClear();
+      for (const handler of eventListeners['after_provider_response'] || []) {
+        await handler({ status: 200, headers: {} }, mockCtx);
+      }
+
+      const clearedWidget = mockCtx.ui.setWidget.mock.calls.at(-1)?.[1];
+      expect(clearedWidget).toBeDefined();
+      expect(clearedWidget!.some((line) => line.includes('Cooldowns:'))).toBe(
+        false,
+      );
+
+      // Simulate Google SDK retry: 429 error response followed by successful turn_end without HTTP 200 event
+      await registeredVm!.route(
+        {
+          model: createTestModel({ provider: 'router', id: 'balanced' }),
+          thinkingLevel: 'high',
+          reason: 'user',
+          messages: [
+            {
+              role: 'user',
+              content: 'plan the architecture deeply',
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        mockCtx,
+      );
+      for (const handler of eventListeners['after_provider_response'] || []) {
+        await handler({ status: 429, headers: {} }, mockCtx);
+      }
+      expect(
+        mockCtx.ui.setWidget.mock.calls
+          .at(-1)?.[1]
+          ?.some((line) => line.includes('Cooldowns: openai/gpt-4o')),
+      ).toBe(true);
+
+      mockCtx.ui.setWidget.mockClear();
+      for (const handler of eventListeners['turn_end'] || []) {
+        await handler(
+          {
+            message: {
+              role: 'assistant',
+              provider: 'openai',
+              model: 'gpt-4o',
+              stopReason: 'stop',
+            },
+          },
+          mockCtx,
+        );
+      }
+      expect(
+        mockCtx.ui.setWidget.mock.calls
+          .at(-1)?.[1]
+          ?.some((line) => line.includes('Cooldowns:')),
+      ).toBe(false);
     });
   });
 });

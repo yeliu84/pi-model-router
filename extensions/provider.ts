@@ -1,4 +1,10 @@
-import type { Api, Context, Model } from '@earendil-works/pi-ai';
+import {
+  isContextOverflow,
+  type Api,
+  type Context,
+  type Message,
+  type Model,
+} from '@earendil-works/pi-ai';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type {
@@ -13,6 +19,8 @@ import type {
   RouterVirtualModelDefinition,
   ModelRouteRequest,
   ModelRoute,
+  ModelCooldownEntry,
+  CustomSessionEntry,
 } from './types';
 import {
   profileNames,
@@ -36,9 +44,16 @@ import {
   decideRouting,
   runClassifier,
   hasImageAttachment,
+  resolveTurnUserMessage,
 } from './routing';
 import { isSameVirtualRouterState } from './state';
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './constants';
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_RATE_LIMIT_COOLDOWN_MS,
+  MIN_RATE_LIMIT_COOLDOWN_MS,
+  MAX_RATE_LIMIT_COOLDOWN_MS,
+} from './constants';
 
 let countedObjects = new WeakSet<object>();
 
@@ -91,6 +106,177 @@ export const markMessageCostCounted = (input: unknown): void => {
   extractUncountedMessageCost(input);
 };
 
+const getCaseInsensitiveHeader = (
+  headers: Record<string, string> | undefined,
+  name: string,
+): string | undefined => {
+  if (!headers) return undefined;
+  if (name in headers) return headers[name];
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === lower) return value;
+  }
+  return undefined;
+};
+
+const clampCooldownMs = (ms: number): number =>
+  Math.min(
+    MAX_RATE_LIMIT_COOLDOWN_MS,
+    Math.max(MIN_RATE_LIMIT_COOLDOWN_MS, Math.ceil(ms)),
+  );
+
+export const parseRetryAfterMs = (
+  headers: Record<string, string> | undefined,
+  now = Date.now(),
+): number | undefined => {
+  const retryAfterMsRaw = getCaseInsensitiveHeader(
+    headers,
+    'retry-after-ms',
+  )?.trim();
+  if (retryAfterMsRaw) {
+    const ms = Number(retryAfterMsRaw);
+    if (Number.isFinite(ms) && ms > 0) return clampCooldownMs(ms);
+  }
+
+  const retryAfterRaw = getCaseInsensitiveHeader(
+    headers,
+    'retry-after',
+  )?.trim();
+  if (retryAfterRaw) {
+    const seconds = Number(retryAfterRaw);
+    const delayMs = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Date.parse(retryAfterRaw) - now;
+    if (Number.isFinite(delayMs) && delayMs > 0)
+      return clampCooldownMs(delayMs);
+  }
+
+  return undefined;
+};
+
+export const pruneExpiredCooldowns = (
+  cooldowns: Map<string, ModelCooldownEntry> | undefined,
+  now = Date.now(),
+): void => {
+  if (!cooldowns) return;
+  for (const [modelRef, entry] of cooldowns) {
+    if (entry.until <= now) {
+      cooldowns.delete(modelRef);
+    }
+  }
+};
+
+export const getActiveCooldownRemainingMs = (
+  cooldowns: ReadonlyMap<string, ModelCooldownEntry> | undefined,
+  modelRef: string,
+  now = Date.now(),
+): number => {
+  const entry = cooldowns?.get(modelRef);
+  return entry && entry.until > now ? entry.until - now : 0;
+};
+
+export const applyProviderResponseCooldown = (
+  cooldowns: Map<string, ModelCooldownEntry>,
+  modelRef: string | undefined,
+  status: number,
+  headers: Record<string, string> | undefined,
+  now = Date.now(),
+): boolean => {
+  pruneExpiredCooldowns(cooldowns, now);
+  if (!modelRef || modelRef.startsWith('router/')) {
+    return false;
+  }
+  if (status >= 200 && status < 300) {
+    return cooldowns.delete(modelRef);
+  }
+  if (status === 429 || status === 503 || status === 529) {
+    const headerDelay = parseRetryAfterMs(headers, now);
+    const delayMs =
+      headerDelay ??
+      (status === 429 || status === 529
+        ? DEFAULT_RATE_LIMIT_COOLDOWN_MS
+        : undefined);
+    if (!delayMs) return false;
+    const nextUntil = Math.max(
+      cooldowns.get(modelRef)?.until ?? 0,
+      now + delayMs,
+    );
+    cooldowns.set(modelRef, { until: nextUntil, status });
+    return true;
+  }
+  return false;
+};
+
+const estimateMessagesTokens = (messages: readonly Message[]): number => {
+  let chars = 0;
+  let images = 0;
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') {
+      chars += msg.content.length;
+      continue;
+    }
+    for (const part of msg.content) {
+      if (part.type === 'text') chars += part.text.length;
+      else if (part.type === 'thinking' && !part.redacted)
+        chars += part.thinking.length;
+      else if (part.type === 'toolCall')
+        chars += part.name.length + JSON.stringify(part.arguments).length;
+      else if (part.type === 'image') images++;
+    }
+  }
+  return Math.ceil(chars / 4) + images * 1200;
+};
+
+const preferCandidates = (
+  candidates: string[],
+  predicate: (ref: string) => boolean,
+): string[] => {
+  if (candidates.length <= 1) return candidates;
+  const preferred: string[] = [];
+  const rest: string[] = [];
+  for (const candidate of candidates) {
+    (predicate(candidate) ? preferred : rest).push(candidate);
+  }
+  return preferred.length > 0 ? [...preferred, ...rest] : candidates;
+};
+
+const formatModelSwitchReasoning = (
+  resolvedRef: string,
+  tier: RouterTier,
+  originalTarget: string,
+  baseReasoning: string,
+  reason: ModelRouteRequest<VirtualRouterState>['reason'],
+  failed: ModelRouteRequest<VirtualRouterState>['failed'],
+  preCooldownFirst: string | undefined,
+  preCooldownRemainingMs: number,
+  isPrimaryRecovery: boolean,
+): string => {
+  if (reason === 'retry' && failed) {
+    const errSuffix = failed.message.errorMessage
+      ? ` (${failed.message.errorMessage})`
+      : '';
+    return `Fallback to ${resolvedRef} after ${failed.model.provider}/${failed.model.id} failed${errSuffix}. (Original: ${baseReasoning})`;
+  }
+  if (isPrimaryRecovery) {
+    return `Recovered primary ${resolvedRef} for ${tier} tier. (Original: ${baseReasoning})`;
+  }
+  if (
+    preCooldownFirst &&
+    preCooldownRemainingMs > 0 &&
+    resolvedRef !== preCooldownFirst
+  ) {
+    const secs = Math.ceil(preCooldownRemainingMs / 1000);
+    return `Fallback to ${resolvedRef} while ${preCooldownFirst} is cooling down (${secs}s remaining). (Original: ${baseReasoning})`;
+  }
+  if (preCooldownFirst && resolvedRef !== preCooldownFirst) {
+    return `Fallback to ${resolvedRef} because ${preCooldownFirst} was unavailable. (Original: ${baseReasoning})`;
+  }
+  if (resolvedRef !== originalTarget) {
+    return `Preserved fallback ${resolvedRef} for ${tier} tier. (Original: ${baseReasoning})`;
+  }
+  return baseReasoning;
+};
+
 const supportsReasoning = (
   profile: RouterConfig['profiles'][string],
   modelRegistry: RouterModelCapabilityLookup | undefined,
@@ -139,6 +325,20 @@ const getTierModels = (
   return [...base.slice(preferredIdx), ...base.slice(0, preferredIdx)];
 };
 
+const resolveVirtualInputModalities = (
+  profile: RouterConfig['profiles'][string],
+  modelRegistry: RouterModelCapabilityLookup | undefined,
+): ('text' | 'image')[] => {
+  if (!modelRegistry) return ['text', 'image'];
+  const refs = ROUTER_TIERS.flatMap((tier) => getTierModels(profile, tier));
+  if (refs.length === 0) return ['text', 'image'];
+  const anySupportsImage = refs.some((ref) => {
+    const resolved = findModelByRef(ref, modelRegistry);
+    return !resolved || Boolean(resolved.input?.includes('image'));
+  });
+  return anySupportsImage ? ['text', 'image'] : ['text'];
+};
+
 const inferDecisionFromPrevious = (
   profileName: string,
   profile: RouterConfig['profiles'][string],
@@ -181,6 +381,8 @@ export interface RouterProviderState<TContext = ExtensionContext> {
   readonly thinkingByProfile: RouterThinkingByProfile;
   readonly pinnedTierByProfile: RouterPinByProfile;
   accumulatedCost: number;
+  modelCooldowns?: Map<string, ModelCooldownEntry>;
+  inFlightModelRef?: string;
 }
 
 export interface RouterProviderActions<TContext = ExtensionContext> {
@@ -303,6 +505,32 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       return { effectiveThinking, delegatedThinking };
     };
 
+    const now = Date.now();
+    pruneExpiredCooldowns(state.modelCooldowns, now);
+
+    const deprioritizeCooledDownModels = (candidates: string[]): string[] =>
+      !state.modelCooldowns || state.modelCooldowns.size === 0
+        ? candidates
+        : preferCandidates(
+            candidates,
+            (ref) =>
+              getActiveCooldownRemainingMs(state.modelCooldowns, ref, now) ===
+              0,
+          );
+
+    const effectiveCtx = ctx ?? state.lastExtensionContext;
+    const ctxSessionManager =
+      effectiveCtx &&
+      typeof effectiveCtx === 'object' &&
+      'sessionManager' in effectiveCtx &&
+      isObjectRecord(effectiveCtx.sessionManager)
+        ? (effectiveCtx.sessionManager as {
+            getBranch?: () => readonly CustomSessionEntry[];
+            getSessionId?: () => string;
+          })
+        : undefined;
+    const sessionId = ctxSessionManager?.getSessionId?.();
+
     const pinnedTier = state.pinnedTierByProfile[profileName];
     const previousDecision =
       request.state?.lastDecision?.profile === profileName
@@ -325,14 +553,17 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         pinnedTier ?? previousDecision?.tier ?? 'medium',
       );
       const tierConfig = profile[directTier]!;
-      const candidates = getTierModels(
-        profile,
-        directTier,
-        previousDecision?.tier === directTier
-          ? previousDecision.targetLabel
-          : undefined,
+      const candidates = deprioritizeCooledDownModels(
+        getTierModels(
+          profile,
+          directTier,
+          previousDecision?.tier === directTier
+            ? previousDecision.targetLabel
+            : undefined,
+        ),
       );
       const resolved = resolveFirstAvailableModel(candidates);
+      state.inFlightModelRef = resolved.modelRef;
       const { delegatedThinking } = resolveDelegatedThinking(
         directTier,
         tierConfig.thinking ?? directTier,
@@ -362,6 +593,10 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       state.accumulatedCost >= state.currentConfig.maxSessionBudget;
 
     const context: Context = { messages: [...request.messages] };
+    const turnUserMessage = resolveTurnUserMessage(
+      context,
+      ctxSessionManager?.getBranch?.(),
+    );
     const lastMessage = request.messages.findLast((m) => m.role !== 'system');
     const isContinuation =
       request.reason === 'continuation' ||
@@ -413,6 +648,7 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         state.currentConfig.phaseBias,
         state.currentConfig.rules,
         isBudgetExceeded,
+        turnUserMessage,
       );
 
       // Classifier Override — skip when pinned, rule-matched, or budget exceeded.
@@ -430,7 +666,11 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
           previousDecision?.phase,
           state.currentConfig.classifierModel.thinking,
           state.currentConfig.phaseBias,
-          request.signal,
+          {
+            signal: request.signal,
+            sessionId,
+            userMessage: turnUserMessage,
+          },
         );
         if (classifierResult?.cost) {
           state.accumulatedCost += classifierResult.cost;
@@ -468,11 +708,13 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
         checkModelSupportsImage,
       )
     ) {
+      const currentTierIdx = ROUTER_TIERS.indexOf(decision.tier);
       const higherTiers = ROUTER_TIERS.slice(
         0,
-        ROUTER_TIERS.indexOf(decision.tier),
+        currentTierIdx,
       ).reverse() as RouterTier[];
-      const foundTier = higherTiers.find((t) =>
+      const lowerTiers = ROUTER_TIERS.slice(currentTierIdx + 1) as RouterTier[];
+      const foundTier = [...higherTiers, ...lowerTiers].find((t) =>
         getTierModels(profile, t).some(checkModelSupportsImage),
       );
       if (foundTier) {
@@ -514,36 +756,107 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
       }
     }
 
-    // On retry, rotate candidates so models after the failed model are attempted first.
+    let isContextRecoveryRetry = false;
     if (request.reason === 'retry' && request.failed?.model) {
       const failedRef = `${request.failed.model.provider}/${request.failed.model.id}`;
-      const failedIdx = modelsToTry.indexOf(failedRef);
-      if (failedIdx !== -1 && modelsToTry.length > 1) {
-        modelsToTry = [
-          ...modelsToTry.slice(failedIdx + 1),
-          ...modelsToTry.slice(0, failedIdx + 1),
-        ];
+      const isContextRecovery =
+        request.failed.message.stopReason === 'length' ||
+        isContextOverflow(
+          request.failed.message,
+          request.failed.model.contextWindow,
+        );
+      const estimatedTokens = estimateMessagesTokens(request.messages);
+      const stillExceedsFailedWindow =
+        request.failed.model.contextWindow > 0 &&
+        estimatedTokens > request.failed.model.contextWindow * 0.9;
+
+      if (isContextRecovery && !stillExceedsFailedWindow) {
+        // Pi already compacted the transcript to recover for failedRef; keep the active model
+        // instead of rotating onto a fallback.
+        isContextRecoveryRetry = true;
+        const failedIdx = modelsToTry.indexOf(failedRef);
+        if (failedIdx > 0) {
+          modelsToTry = [
+            failedRef,
+            ...modelsToTry.slice(0, failedIdx),
+            ...modelsToTry.slice(failedIdx + 1),
+          ];
+        }
+      } else {
+        // Rotate candidates so models after the failed model are attempted first.
+        const failedIdx = modelsToTry.indexOf(failedRef);
+        if (failedIdx !== -1 && modelsToTry.length > 1) {
+          modelsToTry = [
+            ...modelsToTry.slice(failedIdx + 1),
+            ...modelsToTry.slice(0, failedIdx + 1),
+          ];
+        }
+        if (stillExceedsFailedWindow) {
+          modelsToTry = preferCandidates(modelsToTry, (ref) => {
+            const cw = findModelByRef(ref, registry)?.contextWindow ?? 0;
+            return cw === 0 || estimatedTokens <= cw * 0.9;
+          });
+        }
       }
+    }
+
+    const preCooldownFirst = modelsToTry[0];
+    const preCooldownRemainingMs =
+      !isContinuation && preCooldownFirst
+        ? getActiveCooldownRemainingMs(
+            state.modelCooldowns,
+            preCooldownFirst,
+            now,
+          )
+        : 0;
+    if (!isContinuation) {
+      modelsToTry = deprioritizeCooledDownModels(modelsToTry);
     }
 
     const resolved = resolveFirstAvailableModel(modelsToTry);
     const selectedModel = resolved.model;
-    if (resolved.modelRef !== decision.targetLabel || resolved.index > 0) {
+    state.inFlightModelRef = resolved.modelRef;
+
+    const isFallbackTarget =
+      resolved.modelRef !== profile[decision.tier]?.model;
+
+    if (
+      isContextRecoveryRetry &&
+      request.failed &&
+      resolved.modelRef ===
+        `${request.failed.model.provider}/${request.failed.model.id}`
+    ) {
+      const baseReasoning = decision.reasoning.replace(
+        /^Retrying [^\s]+ after context compaction recovery\. \(Original: (.*)\)$/s,
+        '$1',
+      );
+      decision = {
+        ...decision,
+        targetProvider: resolved.provider,
+        targetModelId: resolved.modelId,
+        targetLabel: resolved.modelRef,
+        isFallback: isFallbackTarget ? true : undefined,
+        reasoning: `Retrying ${resolved.modelRef} after context compaction recovery. (Original: ${baseReasoning})`,
+      };
+    } else if (resolved.modelRef !== decision.targetLabel) {
       const originalTarget = decision.targetLabel;
       decision = {
         ...decision,
         targetProvider: resolved.provider,
         targetModelId: resolved.modelId,
         targetLabel: resolved.modelRef,
-        isFallback: true,
-        reasoning:
-          request.reason === 'retry' && request.failed
-            ? `Fallback to ${resolved.modelRef} after ${request.failed.model.provider}/${request.failed.model.id} failed${request.failed.message.errorMessage ? ` (${request.failed.message.errorMessage})` : ''}. (Original: ${decision.reasoning})`
-            : resolved.index > 0
-              ? `Fallback to ${resolved.modelRef} because ${modelsToTry[0]} was unavailable. (Original: ${decision.reasoning})`
-              : resolved.modelRef !== originalTarget
-                ? `Preserved fallback ${resolved.modelRef} for ${decision.tier} tier. (Original: ${decision.reasoning})`
-                : decision.reasoning,
+        isFallback: isFallbackTarget ? true : undefined,
+        reasoning: formatModelSwitchReasoning(
+          resolved.modelRef,
+          decision.tier,
+          originalTarget,
+          decision.reasoning,
+          request.reason,
+          request.failed,
+          preCooldownFirst,
+          preCooldownRemainingMs,
+          !isFallbackTarget && Boolean(decision.isFallback),
+        ),
       };
     }
 
@@ -561,7 +874,6 @@ export const routeVirtualModelRequest = async <TContext = ExtensionContext>(
     state.lastDecision = decision;
     actions.recordDebugDecision(decision);
 
-    const effectiveCtx = ctx ?? state.lastExtensionContext;
     try {
       actions.syncPiThinkingLevel(effectiveThinking);
       if (effectiveCtx) {
@@ -629,12 +941,16 @@ export const registerRouterProvider = <TContext = ExtensionContext>(
       profile,
       state.currentModelRegistry,
     );
+    const input = resolveVirtualInputModalities(
+      profile,
+      state.currentModelRegistry,
+    );
 
     return {
       id: name,
       name: `Router ${name}`,
       thinkingLevels,
-      input: ['text', 'image'] as ('text' | 'image')[],
+      input,
       contextWindow: maxContextWindow,
       maxTokens: maxMaxTokens,
     };
@@ -643,7 +959,7 @@ export const registerRouterProvider = <TContext = ExtensionContext>(
   const modelsKey = modelDefinitions
     .map(
       (m) =>
-        `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.thinkingLevels.join('|')}`,
+        `${m.id}:${m.contextWindow}:${m.maxTokens}:${m.thinkingLevels.join('|')}:${m.input.join('|')}`,
     )
     .join(',');
   if (state.lastRegisteredModels === modelsKey) return;

@@ -4,9 +4,14 @@ import {
   formatPinSummary,
   formatThinkingSummary,
   formatModelRef,
+  formatCooldownSummary,
   updateStatus,
 } from './ui';
-import type { RoutingDecision, RouterConfig } from './types';
+import type {
+  RoutingDecision,
+  RouterConfig,
+  ModelCooldownEntry,
+} from './types';
 
 describe('ui.ts', () => {
   describe('formatDecision', () => {
@@ -339,6 +344,40 @@ describe('ui.ts', () => {
       const costLine = widgetLines!.find((l) => l.includes('Cost'));
       // maxSessionBudget=0 is falsy, so no denominator is shown
       expect(costLine).toBe('[dim]Cost: $0.0000[/dim]');
+    });
+
+    it('should format active cooldowns in widget and ignore expired entries', () => {
+      const now = Date.now();
+      const cooldowns = new Map<string, ModelCooldownEntry>([
+        ['openai/gpt-6.2-sol', { until: now + 29_200, status: 429 }],
+        ['anthropic/claude-opus-5-5', { until: now - 1_000, status: 429 }],
+      ]);
+
+      expect(formatCooldownSummary(cooldowns, now)).toBe(
+        'openai/gpt-6.2-sol (30s)',
+      );
+
+      const ctx = buildMockCtx();
+      updateStatus(
+        ctx,
+        true,
+        'balanced',
+        {},
+        {},
+        undefined,
+        undefined,
+        0,
+        true,
+        mockConfig,
+        cooldowns,
+      );
+
+      const widgetLines = vi.mocked(ctx.ui.setWidget).mock.calls[0][1]!;
+      expect(
+        widgetLines.some((line) =>
+          line.includes('Cooldowns: openai/gpt-6.2-sol'),
+        ),
+      ).toBe(true);
     });
   });
 });

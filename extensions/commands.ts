@@ -11,6 +11,7 @@ import type {
   RoutingDecision,
   RouterTier,
   RouterCommandContext,
+  ModelCooldownEntry,
 } from './types';
 import {
   profileNames,
@@ -27,6 +28,7 @@ import {
   formatThinkingSummary,
   formatModelRef,
   formatSessionCost,
+  formatCooldownSummary,
   formatDecision,
   notifyUnsupportedThinking,
 } from './ui';
@@ -60,6 +62,7 @@ export const registerCommands = <
     widgetEnabled: boolean;
     readonly debugHistory: RoutingDecision[];
     readonly lastConfigWarnings: string[];
+    readonly modelCooldowns?: ReadonlyMap<string, ModelCooldownEntry>;
   },
   actions: {
     persistState: () => void;
@@ -72,6 +75,7 @@ export const registerCommands = <
       strict?: boolean,
     ) => Promise<boolean>;
     syncPiThinkingLevel: (level: ThinkingLevel | undefined) => void;
+    syncTrailingUsage?: (ctx: TCtx) => void;
   },
 ) => {
   const SUBCOMMAND_DETAILS = [
@@ -179,7 +183,9 @@ export const registerCommands = <
       ctx.ui.notify('Usage: /router status (no arguments)', 'error');
       return;
     }
+    actions.syncTrailingUsage?.(ctx);
     const names = profileNames(state.currentConfig).join(', ');
+    const cooldownSummary = formatCooldownSummary(state.modelCooldowns);
     const lines = [
       'Model Router Status:',
       `Router enabled: ${state.routerEnabled ? 'yes' : 'off'}`,
@@ -191,6 +197,7 @@ export const registerCommands = <
       `Widget: ${state.widgetEnabled ? 'on' : 'off'}`,
       `Phase bias: ${state.currentConfig.phaseBias}`,
       `Session cost: ${formatSessionCost(state.accumulatedCost, state.currentConfig.maxSessionBudget)}`,
+      ...(cooldownSummary ? [`Model cooldowns: ${cooldownSummary}`] : []),
       `Available profiles: ${names}`,
       `Last non-router model: ${formatModelRef(state.lastNonRouterModel)}`,
       `Debug: ${state.debugEnabled ? 'on' : 'off'}`,
@@ -215,18 +222,52 @@ export const registerCommands = <
     actions.updateStatus(ctx);
   };
 
+  const promptInteractiveChoice = async <T extends string>(
+    ctx: TCtx,
+    title: string,
+    values: readonly T[],
+    currentValue: string | undefined,
+    currentSuffix: string,
+  ): Promise<{ handled: false } | { handled: true; value?: T }> => {
+    if (!ctx.hasUI || !ctx.ui.select || values.length === 0) {
+      return { handled: false };
+    }
+    const labels = values.map((v) =>
+      v === currentValue ? `${v} (${currentSuffix})` : v,
+    );
+    const choice = await ctx.ui.select(title, labels, {
+      blockedKind: 'question',
+    });
+    if (!choice) return { handled: true };
+    const idx = labels.indexOf(choice);
+    return { handled: true, value: idx >= 0 ? values[idx] : (choice as T) };
+  };
+
   const handleProfile = async (args: string[], ctx: TCtx) => {
     if (args.length > 1) {
       ctx.ui.notify('Usage: /router profile [name]', 'error');
       return;
     }
-    const profileName = args[0];
+    let profileName = args[0];
     if (!profileName) {
-      ctx.ui.notify(
-        `Current profile: ${state.selectedProfile}. Available: ${profileNames(state.currentConfig).join(', ')}`,
-        'info',
+      const names = profileNames(state.currentConfig);
+      const interactive = await promptInteractiveChoice(
+        ctx,
+        'Select router profile',
+        names,
+        state.routerEnabled ? state.selectedProfile : undefined,
+        'active',
       );
-      return;
+      if (interactive.handled) {
+        if (!interactive.value) return;
+        profileName = interactive.value;
+      } else {
+        ctx.ui.notify(
+          `Current profile: ${state.selectedProfile}. Available: ${names.join(', ')}`,
+          'info',
+        );
+        return;
+      }
     }
     const success = await actions.switchToRouterProfile(profileName, ctx);
     if (success) {
@@ -246,25 +287,37 @@ export const registerCommands = <
       );
       return;
     }
-    if (args.length === 0) {
-      ctx.ui.notify(
-        [
-          `Profile: ${currentProfile}`,
-          `Pinned tier: ${state.pinnedTierByProfile[currentProfile] ?? 'auto'}`,
-          `Usage: /router pin <high|medium|low|auto>`,
-        ].join('\n'),
-        'info',
-      );
-      actions.updateStatus(ctx);
-      return;
-    }
-
     if (args.length > 1) {
       ctx.ui.notify('Usage: /router pin <high|medium|low|auto>', 'error');
       return;
     }
 
-    const pinValue = args[0];
+    let pinValue = args[0];
+    if (!pinValue) {
+      const currentPin = state.pinnedTierByProfile[currentProfile] ?? 'auto';
+      const interactive = await promptInteractiveChoice(
+        ctx,
+        `Pin router/${currentProfile} tier`,
+        ROUTER_PIN_VALUES,
+        currentPin,
+        'current',
+      );
+      if (interactive.handled) {
+        if (!interactive.value) return;
+        pinValue = interactive.value;
+      } else {
+        ctx.ui.notify(
+          [
+            `Profile: ${currentProfile}`,
+            `Pinned tier: ${currentPin}`,
+            `Usage: /router pin <high|medium|low|auto>`,
+          ].join('\n'),
+          'info',
+        );
+        actions.updateStatus(ctx);
+        return;
+      }
+    }
 
     if (
       !ROUTER_PIN_VALUES.includes(

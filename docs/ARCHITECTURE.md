@@ -26,12 +26,12 @@ For every request sent to a `router/*` virtual model, `route(request, ctx)` insp
 
 - **`direct` requests** (e.g., compaction summaries): Routed directly to the `medium` (or pinned) tier without mutating session routing state or running the classifier.
 - **`continuation` requests** (tool-result continuations within a turn): Preserves the previous routed model for the turn to maintain provider prompt caches and thinking signatures (unless a new pin, budget cap, or image attachment requires switching).
-- **`retry` requests** (automatic retry after a failed request): Advances to the next available model in the tier's `fallbacks` chain after `request.failed.model`.
-- **`user` requests** (new user prompt, steer, or follow-up): Executes the full tier selection pipeline:
+- **`retry` requests** (automatic retry after a failed request): Preserves the active model when retrying after Pi's automatic context-overflow / length compaction recovery (provided the compacted history fits), and otherwise advances to the next available model in the tier's `fallbacks` chain after `request.failed.model`.
+- **`user` requests** (new user prompt, steer, or follow-up): Executes the full tier selection pipeline against the authoritative user prompt (ignoring injected `custom_message` entries and compaction/branch summary wrappers):
   1. **Budget Check**: If `maxSessionBudget` is configured and session spend exceeds it, downgrades `high` tier requests to `medium`.
   2. **Manual Pin**: Uses the tier pinned via `/router pin` or `/router fix`.
   3. **Custom Rules**: Matches keyword-based rules defined in config against the user prompt.
-  4. **Classifier (Optional)**: When `classifierModel` is configured, prefers Pi's native classifier models (`ctx.modelRegistry.classify()` with `"auto"`, TypeSafe Jev, GitHub Copilot `microsoft-decision-1`, Cloudflare Clef / Clef Omni, OpenAI GPT-6 Luna, or `llama.cpp` classifiers — with image filtering and text-only fallback) and falls back to chat LLM classification (`ctx.modelRegistry.streamSimple()`).
+  4. **Classifier (Optional)**: When `classifierModel` is configured, prefers Pi's native decision models (`ctx.modelRegistry.classify()` with `"auto"`, TypeSafe Jev, Radius `pi-decision` models, GitHub Copilot `gpt-6-luna-decisions` / `microsoft-decision-1`, Cloudflare Clef / Clef Omni, OpenAI GPT-6 Luna, OpenRouter System One, or `llama.cpp` classifiers — with image filtering, `sessionId` correlation, and text-only fallback) and falls back to chat LLM classification (`ctx.modelRegistry.streamSimple()` with `disableContinuation: true`).
   5. **Heuristics (Fallback)**: Uses fast local heuristics (keyword/length/tool-use analysis) if the classifier is off or fails.
   6. **Biased Stickiness**: The `phaseBias` setting modulates heuristic thresholds and low-confidence classifier probabilities to keep the router in a consistent phase.
   7. **First-Turn Auto-Pin (Optional)**: When `autoPinFirstTurnDecision` is enabled, the router automatically pins the active profile to the tier selected on the first turn of a conversation. Users can run `/router pin auto` at any time to unpin and return to dynamic per-turn routing.
@@ -57,6 +57,6 @@ The router state is persisted using `pi.appendEntry` with a custom type `router-
 - Maintain independent pins and state for different conversation branches.
 - Track accumulated session costs safely.
 
-## Reliability: Fallback Chains
+## Reliability: Fallback Chains & Rate-Limit Cooldowns
 
-Each tier in a profile can define an optional `fallbacks` list. If the primary model fails (e.g., due to rate limits or provider downtime), the router automatically retries the next model in the chain before surfacing an error to the user.
+Each tier in a profile can define an optional `fallbacks` list. If the primary model fails (e.g., due to rate limits or provider downtime), the router automatically retries the next model in the chain before surfacing an error to the user. Using Pi `1.6.1`+'s `after_provider_response` hook, the router also tracks HTTP `429` / `503` / `529` `Retry-After` cooldown windows per physical model and routes new, `retry`, and `direct` requests around actively rate-limited models until their cooldown expires or a response succeeds.

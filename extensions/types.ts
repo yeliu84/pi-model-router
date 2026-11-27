@@ -5,11 +5,13 @@ import type {
   ClassifierContext,
   ClassifierModel,
   ClassifierResult,
+  Message,
   Model,
 } from '@earendil-works/pi-ai';
 import type {
   ExtensionAPI,
   ExtensionContext,
+  ExtensionUIDialogOptions,
   ModelRoute,
   ModelRouteReason,
   ModelRouteRequest,
@@ -71,6 +73,22 @@ export interface ClassifierDecisionResult {
   cost?: number;
 }
 
+export interface ClassifierCallOptions {
+  signal?: AbortSignal;
+  sessionId?: string;
+  userMessage?: Message;
+}
+
+export interface ModelCooldownEntry {
+  until: number;
+  status: number;
+}
+
+export interface RouterAfterProviderResponseEvent {
+  status: number;
+  headers: Record<string, string>;
+}
+
 export interface RouterUIContext {
   ui: {
     setStatus: (key: string, text: string | undefined) => void;
@@ -82,16 +100,23 @@ export interface RouterUIContext {
 }
 
 export interface RouterCommandContext {
+  hasUI?: boolean;
   ui: {
     notify: (message: string, type?: 'info' | 'warning' | 'error') => void;
     setStatus: (key: string, text: string | undefined) => void;
     setWidget: (key: string, content: string[] | undefined) => void;
+    select?: (
+      title: string,
+      options: string[],
+      opts?: ExtensionUIDialogOptions,
+    ) => Promise<string | undefined>;
   };
   modelRegistry: RouterModelLookup;
   model: Pick<Model<Api>, 'provider' | 'id'> | undefined;
 }
 
 export interface RouterExtensionContext extends RouterUIContext {
+  hasUI?: boolean;
   cwd: string;
   modelRegistry: RouterModelRegistry;
   model:
@@ -104,6 +129,7 @@ export interface RouterExtensionContext extends RouterUIContext {
     | undefined;
   sessionManager: {
     getBranch: () => readonly CustomSessionEntry[];
+    getSessionId?: () => string;
   };
   ui: RouterUIContext['ui'] & RouterCommandContext['ui'];
 }
@@ -168,6 +194,7 @@ export interface RouterExtensionAPI<
       | 'session_start'
       | 'session_tree'
       | 'session_compact'
+      | 'session_compact_failed'
       | 'turn_start'
       | 'turn_end',
     handler: (event: unknown, ctx: TCtx) => Promise<void> | void,
@@ -180,6 +207,13 @@ export interface RouterExtensionAPI<
     event: 'thinking_level_select',
     handler: (
       event: RouterThinkingLevelSelectEvent,
+      ctx: TCtx,
+    ) => Promise<void> | void,
+  ): void;
+  on(
+    event: 'after_provider_response',
+    handler: (
+      event: RouterAfterProviderResponseEvent,
       ctx: TCtx,
     ) => Promise<void> | void,
   ): void;
